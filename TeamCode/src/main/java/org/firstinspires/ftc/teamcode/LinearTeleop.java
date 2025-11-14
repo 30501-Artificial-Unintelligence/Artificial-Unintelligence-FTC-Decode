@@ -5,28 +5,31 @@ import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
 import com.qualcomm.robotcore.hardware.DcMotor;
 import com.qualcomm.robotcore.hardware.DcMotorEx;
 import com.qualcomm.robotcore.hardware.DcMotorSimple;
+
+import org.firstinspires.ftc.teamcode.subsystems.ShooterSubsystem;
 //This test works
 @TeleOp (name = "First_Teleop")
 public class LinearTeleop extends LinearOpMode {
+    private ShooterSubsystem shooter;
+
+
     @Override
     public void runOpMode() throws InterruptedException {
         //intialization code
-        DcMotor motorOne;
-        motorOne = hardwareMap.get(DcMotor.class,"motor_one");
+        //init hardware via subsystem
+        shooter = new ShooterSubsystem(hardwareMap);
 
-        motorOne.setDirection(DcMotorSimple.Direction.FORWARD);
 
-        motorOne.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.FLOAT);
+        //init Vars
 
-        motorOne.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
-        //motorOne.setMode(DcMotor.RunMode.STOP_AND_RESET_ENCODER);
-            //resets encoder ticks
 
         waitForStart();
 
         while(opModeIsActive()){
-            motorOne.setPower(1); //[-1,1] // for DCmotor , non Ex
-            //motorOne.setVelocity(2800);
+            shooter.update(gamepad1.a);
+
+            telemetry.addData("Shooter on", shooter.isOn());
+            telemetry.update();
         }
     }
 }
