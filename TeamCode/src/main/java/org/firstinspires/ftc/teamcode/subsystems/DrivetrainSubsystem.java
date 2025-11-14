@@ -11,6 +11,9 @@ public class DrivetrainSubsystem {
     private DcMotorEx backLeft;
     private DcMotorEx backRight;
     private static final double MAX_TICKS_PER_SEC = 2815.0;
+
+    // 1.0 = full speed, 0.4 = 40% speed, etc.
+    private double driveScale = 1.0;
     public DrivetrainSubsystem (HardwareMap hardwareMap) {
         // --- HARDWARE MAPPING ---
         frontLeft  = hardwareMap.get(DcMotorEx.class, "FrontLeft");
@@ -52,10 +55,19 @@ public class DrivetrainSubsystem {
         double fr = (y - x - rx) / denominator;
         double br = (y + x - rx) / denominator;
 
-        frontLeft.setVelocity(fl * MAX_TICKS_PER_SEC);
-        backLeft.setVelocity(bl * MAX_TICKS_PER_SEC);
-        frontRight.setVelocity(fr * MAX_TICKS_PER_SEC);
-        backRight.setVelocity(br * MAX_TICKS_PER_SEC);
+        // apply slow-mode scaling to velocity
+        frontLeft.setVelocity(fl * MAX_TICKS_PER_SEC * driveScale);
+        backLeft.setVelocity(bl * MAX_TICKS_PER_SEC * driveScale);
+        frontRight.setVelocity(fr * MAX_TICKS_PER_SEC * driveScale);
+        backRight.setVelocity(br * MAX_TICKS_PER_SEC * driveScale);
 
+    }
+
+    public void setDriveScale(double scale) {
+        driveScale = scale;
+    }
+
+    public double getDriveScale() {
+        return driveScale;
     }
 }
