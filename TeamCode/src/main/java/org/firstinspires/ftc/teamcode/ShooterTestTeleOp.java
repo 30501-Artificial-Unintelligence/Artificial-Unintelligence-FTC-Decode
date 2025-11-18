@@ -17,7 +17,9 @@ public class ShooterTestTeleOp extends LinearOpMode {
 
         while (opModeIsActive()) {
             boolean buttonPressed = gamepad1.a;  // A toggles shooter
-            shooter.update(buttonPressed);
+            double gamepad1LeftY = gamepad1.left_stick_y;
+            //shooter.update(buttonPressed);
+            shooter.joystick(buttonPressed, gamepad1LeftY);
 
             telemetry.addData("Shooter on?", shooter.isOn());
             telemetry.update();

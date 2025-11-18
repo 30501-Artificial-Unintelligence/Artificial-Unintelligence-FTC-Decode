@@ -8,6 +8,7 @@ import com.qualcomm.robotcore.hardware.HardwareMap;
 public class ShooterSubsystem {
     private static final double MAX_TICKS_PER_SECOND = 2800.0; // 6000 RPM goBILDA motor
 
+    private static double adjustableSpeed = 0.0;
     private final DcMotorEx motorOne;
     private boolean isOn = false;
     private boolean lastButton = false;
@@ -34,6 +35,25 @@ public class ShooterSubsystem {
 
         lastButton = buttonPressed;
     }
+
+    public void joystick(boolean buttonPressed, double gamepad1LeftY) {
+        // Toggle on/off on rising edge
+        if (buttonPressed && !lastButton) {
+            isOn = !isOn;
+        }
+
+        // If on, use joystick to control speed
+        if (isOn) {
+            adjustableSpeed = gamepad1LeftY * MAX_TICKS_PER_SECOND;
+            motorOne.setVelocity(adjustableSpeed);
+        } else {
+            motorOne.setVelocity(0.0);
+        }
+
+        lastButton = buttonPressed;
+    }
+
+
 
     public boolean isOn() {
         return isOn;
