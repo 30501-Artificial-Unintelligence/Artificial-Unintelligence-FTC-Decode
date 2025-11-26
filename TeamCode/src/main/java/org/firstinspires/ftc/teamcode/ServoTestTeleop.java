@@ -15,7 +15,7 @@ public class ServoTestTeleop extends LinearOpMode{
 
             waitForStart();;
             while(opModeIsActive()){
-                servoOne.setPosition(gamepad1.right_stick_y);
+                servoOne.setPosition(0.5+gamepad1.right_stick_y*0.5);
             }
     }
 }
