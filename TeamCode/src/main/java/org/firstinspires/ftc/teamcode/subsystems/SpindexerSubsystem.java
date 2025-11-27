@@ -144,7 +144,11 @@ public class SpindexerSubsystem {
         motor.setMode(DcMotor.RunMode.RUN_TO_POSITION);
         motor.setPower(power);
 
-        while (motor.isBusy()) {
+        long startTime = System.currentTimeMillis();
+        long timeoutMs = 500;  // max time we’ll wait for this move (tune this!)
+
+        while (motor.isBusy()
+                && (System.currentTimeMillis() - startTime) < timeoutMs) {
             try {
                 Thread.sleep(5);
             } catch (InterruptedException e) {
@@ -153,7 +157,10 @@ public class SpindexerSubsystem {
         }
 
         motor.setPower(0);
+        // Optional: go back to RUN_USING_ENCODER so other code can use it
+        motor.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
     }
+
 
     private void moveSlotToIntake(int slotIndex, double power) {
         double angle = slotCenterAngleAtIntake(slotIndex);
