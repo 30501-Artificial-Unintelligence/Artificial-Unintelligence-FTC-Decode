@@ -7,6 +7,7 @@ import com.qualcomm.robotcore.hardware.DcMotorEx;
 import com.qualcomm.robotcore.hardware.HardwareMap;
 import com.qualcomm.robotcore.hardware.NormalizedColorSensor;
 import android.graphics.Color;
+import org.firstinspires.ftc.robotcore.external.navigation.DistanceUnit;
 
 
 
@@ -51,6 +52,14 @@ public class SpindexerSubsystem {
     private int ejectStartIndex = 0;
 
     private final Ball[] slots = new Ball[SLOT_COUNT];
+
+    private boolean pendingAutoRotate = false;
+    private long autoRotateTime = 0;
+
+    // Auto-intake state
+    private boolean lastBallPresent = false;
+    private long autoRotateTimeMs = 0;
+
 
     public SpindexerSubsystem(HardwareMap hardwareMap) {
         motor = hardwareMap.get(DcMotorEx.class, "spindexerMotor");
@@ -160,44 +169,35 @@ public class SpindexerSubsystem {
     // ===== Color / ball handling =====
 
     private Ball detectBallColor() {
-        // Raw RGB from REV Color Sensor V3
+        // Check distance first: only detect if a ball is "close"
+        double distCm = intakeColor.getDistance(DistanceUnit.CM);
+        if (distCm > 2.0) {
+            return Ball.UNKNOWN; // no ball close enough
+        }
+
         int r = intakeColor.red();
         int g = intakeColor.green();
         int b = intakeColor.blue();
 
-        // If everything is very dark, treat as no ball
-        if (r + g + b < 50) {
+        int sum = r + g + b;
+        if (sum < 60) {
             return Ball.UNKNOWN;
         }
 
-        // Convert to HSV using Android's Color utility
-        float[] hsv = new float[3];
-        // Color.rgb expects 0–255, sensor values are usually in that ballpark already
-        int rgb = Color.rgb(r, g, b);
-        Color.colorToHSV(rgb, hsv);
+        double rn = r / (double) sum;
+        double gn = g / (double) sum;
+        double bn = b / (double) sum;
 
-        float hue = hsv[0];   // 0..360
-        float sat = hsv[1];   // 0..1
-        float val = hsv[2];   // 0..1
-
-        // Filter out very dark or desaturated readings
-        if (val < 0.1f) return Ball.UNKNOWN;
-        if (sat < 0.3f) return Ball.UNKNOWN;
-
-        // ---- Initial ranges (tune after testing!) ----
-        // Green ~ 80–160°
-        if (hue >= 80f && hue <= 160f) {
+        // If green channel dominates strongly → GREEN
+        if (gn > rn + 0.10 && gn > bn + 0.10) {
             return Ball.GREEN;
         }
 
-        // Purple / violet ~ 260–320°
-        if (hue >= 260f && hue <= 320f) {
-            return Ball.PURPLE;
-        }
-
-
-        return Ball.UNKNOWN;
+        // Otherwise, treat as PURPLE (any non-green ball)
+        return Ball.PURPLE;
     }
+
+
 
 
     /**
@@ -217,9 +217,39 @@ public class SpindexerSubsystem {
         telemetry.addData("Intake", "Slot %d = %s", intakeIndex, color);
 
         // 3. Advance to next slot at intake
-        int nextIndex = (intakeIndex + 1) % SLOT_COUNT;
-        moveSlotToIntake(nextIndex, MOVE_POWER);
+        pendingAutoRotate = true;
+        autoRotateTime = System.currentTimeMillis()+ 100;
     }
+
+    public void update(Telemetry telemetry) {
+        // 1) Auto-intake if not full
+        if (!isFull()) {
+            double distCm = intakeColor.getDistance(DistanceUnit.CM);
+            boolean ballPresent = distCm <= 2.0;
+
+            // Rising edge: ball just appeared in front of intake sensor
+            if (ballPresent && !lastBallPresent && slots[intakeIndex] == Ball.EMPTY) {
+                Ball color = detectBallColor();
+                slots[intakeIndex] = color;
+                telemetry.addData("AutoIntake", "Slot %d = %s", intakeIndex, color);
+
+                // Schedule an auto-rotate to next slot in 0.1s
+                pendingAutoRotate = true;
+                autoRotateTimeMs = System.currentTimeMillis() + 100;
+            }
+
+            lastBallPresent = ballPresent;
+        }
+
+        // 2) Handle pending auto-rotate
+        if (pendingAutoRotate && System.currentTimeMillis() >= autoRotateTimeMs) {
+            pendingAutoRotate = false;
+
+            int nextIndex = (intakeIndex + 1) % SLOT_COUNT;
+            moveSlotToIntake(nextIndex, MOVE_POWER);
+        }
+    }
+
 
     // We "have three balls" if all slots are non-EMPTY.
     public boolean hasThreeBalls() {
@@ -334,4 +364,31 @@ public class SpindexerSubsystem {
     public int getIntakeIndex() {
         return intakeIndex;
     }
+
+    public boolean isFull() {
+        for (Ball b : slots) {
+            if (b == Ball.EMPTY) return false;
+        }
+        return true;
+    }
+
+    public boolean hasAnyBall() {
+        for (Ball b : slots) {
+            if (b != Ball.EMPTY) return true;
+        }
+        return false;
+    }
+
+    public boolean slotHasBall(int slotIndex) {
+        return slots[slotIndex] != Ball.EMPTY;
+    }
+
+    public void clearSlot(int slotIndex) {
+        slots[slotIndex] = Ball.EMPTY;
+    }
+
+    public void moveSlotToLoadBlocking(int slotIndex) {
+        moveSlotToLoad(slotIndex, MOVE_POWER);
+    }
+
 }

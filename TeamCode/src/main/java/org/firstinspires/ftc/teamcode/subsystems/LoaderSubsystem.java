@@ -10,8 +10,8 @@ public class LoaderSubsystem {
     private final ElapsedTime cycleTimer = new ElapsedTime();
 
     // crop range on the physical servo
-    private static final double SERVO_MIN = 0.35;
-    private static final double SERVO_MAX = 0.6;
+    private static final double SERVO_MIN = 0.32;
+    private static final double SERVO_MAX = 0.62;
 
     // logical positions (0–1 BEFORE scaling)
     private static final double DEFAULT_POS = 0.0; // -> 0.3 physical
