@@ -11,7 +11,6 @@ import org.firstinspires.ftc.teamcode.subsystems.SpindexerSubsystem;
 @TeleOp(name = "Shooter Test", group = "Test")
 public class ShooterTestTeleOp extends LinearOpMode {
 
-    // ---- FIELDS (only here, do NOT redeclare inside runOpMode) ----
     private ShooterSubsystem shooter;
     private IntakeSubsystem intake;
     private SpindexerSubsystem spindexer;
@@ -28,13 +27,8 @@ public class ShooterTestTeleOp extends LinearOpMode {
     private long ejectPhaseTime = 0;
     private int ejectPhase = 0; // 0 = find/rotate, 1 = wait before loader, 2 = wait after loader
 
-    private boolean lastDpadLeft = false;
-    private boolean lastDpadRight = false;
-
-
     @Override
     public void runOpMode() {
-        // ---- SUBSYSTEM INITIALIZATION (must happen BEFORE any use) ----
         shooter = new ShooterSubsystem(hardwareMap);
         loader  = new LoaderSubsystem(hardwareMap);
         intake  = new IntakeSubsystem(hardwareMap);
@@ -54,22 +48,6 @@ public class ShooterTestTeleOp extends LinearOpMode {
                     gamepad1.dpad_up,
                     gamepad1.dpad_down
             );
-
-            //spindexer tuning
-            // D-pad left/right edge detection for tuning abs offset
-            boolean dpadLeftEdge = gamepad1.dpad_left && !lastDpadLeft;
-            boolean dpadRightEdge = gamepad1.dpad_right && !lastDpadRight;
-            lastDpadLeft = gamepad1.dpad_left;
-            lastDpadRight = gamepad1.dpad_right;
-
-            // Nudge offset (in degrees) and re-auto-zero
-            if (dpadLeftEdge) {
-                spindexer.nudgeAbsMechOffsetDeg(-1.0);  // rotate "home" a bit one way
-            }
-            if (dpadRightEdge) {
-                spindexer.nudgeAbsMechOffsetDeg(+1.0);  // rotate "home" the other way
-            }
-
 
             // ===== LOADER (manual B) =====
             boolean b = gamepad1.b;
@@ -93,7 +71,7 @@ public class ShooterTestTeleOp extends LinearOpMode {
                 ejectPhase = 0;
             }
 
-// ===== EJECT STATE MACHINE =====
+            // ===== EJECT STATE MACHINE =====
             if (ejecting) {
                 long now = System.currentTimeMillis();
 
@@ -129,13 +107,10 @@ public class ShooterTestTeleOp extends LinearOpMode {
                 }
             }
 
-
             // ===== TELEMETRY =====
             SpindexerSubsystem.Ball[] s = spindexer.getSlots();
 
             boolean readyForIntake = !ejecting && !spindexer.isAutoRotating();
-
-            telemetry.addData("Spd absOffsetDeg", "%.1f", spindexer.getAbsMechOffsetDeg());
             telemetry.addData("Spd intakeSlot", spindexer.getIntakeSlotIndex());
             telemetry.addData("Spd readyForIntake", readyForIntake);
             telemetry.addData("Spd full", spindexer.isFull());
@@ -144,7 +119,6 @@ public class ShooterTestTeleOp extends LinearOpMode {
             telemetry.addData("Spd slot[1]", s[1]);
             telemetry.addData("Spd slot[2]", s[2]);
             spindexer.debugAbsAngle(telemetry);
-
 
             telemetry.addData("Shooter On", shooter.isOn());
             telemetry.addData("Target RPM", "%.0f", shooter.getTargetRpm());
