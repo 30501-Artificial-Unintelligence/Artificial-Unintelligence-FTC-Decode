@@ -60,6 +60,8 @@ public class SpindexerSubsystem {
     private boolean lastBallPresent = false;
     private long autoRotateTimeMs = 0;
 
+    // Start at 0; we’ll tune this from TeleOp.
+    private double absMechOffsetDeg = 0.0;
 
     public SpindexerSubsystem(HardwareMap hardwareMap) {
         motor = hardwareMap.get(DcMotorEx.class, "spindexerMotor");
@@ -96,7 +98,11 @@ public class SpindexerSubsystem {
      * and set zeroTicks so angleToTicks(slotCenterAngle) == current motor pos.
      */
     private void autoZeroFromAbs() {
-        double angle = getAbsAngleDeg();
+        // Read raw abs angle and apply mechanical offset
+        double angle = getAbsAngleDeg() - absMechOffsetDeg;
+
+        // Normalize to [0,360)
+        angle = (angle % 360.0 + 360.0) % 360.0;
 
         // Slot centers: 0, 120, 240
         double[] centers = {0.0, 120.0, 240.0};
@@ -115,11 +121,11 @@ public class SpindexerSubsystem {
         intakeIndex = bestIndex;
         double bestCenter = centers[bestIndex];
 
-        // We want angleToTicks(bestCenter) == current motor encoder reading
         int currentTicks = motor.getCurrentPosition();
         int expectedOffset = (int) Math.round((bestCenter / 360.0) * TICKS_PER_REV);
         zeroTicks = currentTicks - expectedOffset;
     }
+
 
     private double smallestAngleDiff(double a, double b) {
         double diff = a - b;
@@ -234,13 +240,11 @@ public class SpindexerSubsystem {
             double distCm = intakeColor.getDistance(DistanceUnit.CM);
             boolean ballPresent = distCm <= 2.0;
 
-            // Rising edge: ball just appeared in front of intake sensor
             if (ballPresent && !lastBallPresent && slots[intakeIndex] == Ball.EMPTY) {
                 Ball color = detectBallColor();
                 slots[intakeIndex] = color;
                 telemetry.addData("AutoIntake", "Slot %d = %s", intakeIndex, color);
 
-                // Schedule an auto-rotate to next slot in 0.1s
                 pendingAutoRotate = true;
                 autoRotateTimeMs = System.currentTimeMillis() + 100;
             }
@@ -248,12 +252,21 @@ public class SpindexerSubsystem {
             lastBallPresent = ballPresent;
         }
 
-        // 2) Handle pending auto-rotate
+        // 2) Handle pending auto-rotate (non-blocking)
         if (pendingAutoRotate && System.currentTimeMillis() >= autoRotateTimeMs) {
-            pendingAutoRotate = false;
+            if (!motor.isBusy()) {  // Only start if motor is free
+                pendingAutoRotate = false;
+                int nextIndex = (intakeIndex + 1) % SLOT_COUNT;
 
-            int nextIndex = (intakeIndex + 1) % SLOT_COUNT;
-            moveSlotToIntake(nextIndex, MOVE_POWER);
+                // Non-blocking move
+                double angle = slotCenterAngleAtIntake(nextIndex);
+                int target = angleToTicks(angle);
+                motor.setTargetPosition(target);
+                motor.setMode(DcMotor.RunMode.RUN_TO_POSITION);
+                motor.setPower(MOVE_POWER);
+
+                intakeIndex = nextIndex;
+            }
         }
     }
 
@@ -397,5 +410,49 @@ public class SpindexerSubsystem {
     public void moveSlotToLoadBlocking(int slotIndex) {
         moveSlotToLoad(slotIndex, MOVE_POWER);
     }
+
+    // Which slot the code thinks is at the INTAKE position
+    public int getIntakeSlotIndex() {
+        return intakeIndex;
+    }
+
+    // Are we in the middle of an auto-rotate (from auto-intake)?
+    public boolean isAutoRotating() {
+        return pendingAutoRotate;
+    }
+
+    // Convenience: move back so slot 0 is at intake
+    public void homeToIntake() {
+        moveSlotToIntake(0, MOVE_POWER);
+    }
+
+    // Adjust the mechanical offset by delta degrees and re-zero using abs encoder
+    public void nudgeAbsMechOffsetDeg(double deltaDeg) {
+        // Adjust offset
+        absMechOffsetDeg += deltaDeg;
+
+        // Recompute zeroTicks & intakeIndex based on new offset
+        autoZeroFromAbs();
+
+        // Now physically move so that slot 0 is at the intake position
+        homeToIntake();
+    }
+
+
+    // Get current offset (for telemetry)
+    public double getAbsMechOffsetDeg() {
+        return absMechOffsetDeg;
+    }
+
+    public void debugAbsAngle(org.firstinspires.ftc.robotcore.external.Telemetry telemetry) {
+        double raw = getAbsAngleDeg();
+        double corrected = (raw - absMechOffsetDeg + 360.0) % 360.0;
+        telemetry.addData("Abs raw", "%.1f deg", raw);
+        telemetry.addData("Abs corr", "%.1f deg", corrected);
+        telemetry.addData("Abs offset", "%.1f deg", absMechOffsetDeg);
+        telemetry.addData("Intake slot index", intakeIndex);
+    }
+
+
 
 }

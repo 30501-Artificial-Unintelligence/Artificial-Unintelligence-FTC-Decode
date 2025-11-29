@@ -28,6 +28,10 @@ public class ShooterTestTeleOp extends LinearOpMode {
     private long ejectPhaseTime = 0;
     private int ejectPhase = 0; // 0 = find/rotate, 1 = wait before loader, 2 = wait after loader
 
+    private boolean lastDpadLeft = false;
+    private boolean lastDpadRight = false;
+
+
     @Override
     public void runOpMode() {
         // ---- SUBSYSTEM INITIALIZATION (must happen BEFORE any use) ----
@@ -51,6 +55,22 @@ public class ShooterTestTeleOp extends LinearOpMode {
                     gamepad1.dpad_down
             );
 
+            //spindexer tuning
+            // D-pad left/right edge detection for tuning abs offset
+            boolean dpadLeftEdge = gamepad1.dpad_left && !lastDpadLeft;
+            boolean dpadRightEdge = gamepad1.dpad_right && !lastDpadRight;
+            lastDpadLeft = gamepad1.dpad_left;
+            lastDpadRight = gamepad1.dpad_right;
+
+            // Nudge offset (in degrees) and re-auto-zero
+            if (dpadLeftEdge) {
+                spindexer.nudgeAbsMechOffsetDeg(-1.0);  // rotate "home" a bit one way
+            }
+            if (dpadRightEdge) {
+                spindexer.nudgeAbsMechOffsetDeg(+1.0);  // rotate "home" the other way
+            }
+
+
             // ===== LOADER (manual B) =====
             boolean b = gamepad1.b;
             if (b && !prevB) {
@@ -73,28 +93,34 @@ public class ShooterTestTeleOp extends LinearOpMode {
                 ejectPhase = 0;
             }
 
-            // ===== EJECT STATE MACHINE =====
+// ===== EJECT STATE MACHINE =====
             if (ejecting) {
                 long now = System.currentTimeMillis();
 
                 if (ejectPhase == 0) {
                     // Find next non-empty slot
-                    if (ejectSlotIndex >= 3) {
+                    if (ejectSlotIndex >= 3 || !spindexer.hasAnyBall()) {
+                        // Done ejecting: go back so slot 0 is at the intake position
+                        spindexer.homeToIntake();
                         ejecting = false;
                     } else if (!spindexer.slotHasBall(ejectSlotIndex)) {
+                        // Skip empty slot
                         ejectSlotIndex++;
                     } else {
+                        // Rotate this slot to LOAD (blocking move with timeout)
                         spindexer.moveSlotToLoadBlocking(ejectSlotIndex);
-                        ejectPhaseTime = now + 100; // wait 0.1s before loader
+                        ejectPhaseTime = now + 100; // wait 0.1s before loader fires
                         ejectPhase = 1;
                     }
                 } else if (ejectPhase == 1) {
+                    // After 0.1s at LOAD, fire the loader
                     if (now >= ejectPhaseTime) {
                         loader.startCycle();
-                        ejectPhaseTime = now + 100; // wait 0.1s after firing
+                        ejectPhaseTime = now + 100; // wait another 0.1s after firing
                         ejectPhase = 2;
                     }
                 } else if (ejectPhase == 2) {
+                    // After extra 0.1s, mark slot empty and move to next
                     if (now >= ejectPhaseTime) {
                         spindexer.clearSlot(ejectSlotIndex);
                         ejectSlotIndex++;
@@ -103,16 +129,22 @@ public class ShooterTestTeleOp extends LinearOpMode {
                 }
             }
 
+
             // ===== TELEMETRY =====
             SpindexerSubsystem.Ball[] s = spindexer.getSlots();
-            telemetry.addData("Spd enc", spindexer.getEncoder());
-            telemetry.addData("Spd target", spindexer.getTarget());
-            telemetry.addData("Spd intakeIndex", spindexer.getIntakeIndex());
+
+            boolean readyForIntake = !ejecting && !spindexer.isAutoRotating();
+
+            telemetry.addData("Spd absOffsetDeg", "%.1f", spindexer.getAbsMechOffsetDeg());
+            telemetry.addData("Spd intakeSlot", spindexer.getIntakeSlotIndex());
+            telemetry.addData("Spd readyForIntake", readyForIntake);
             telemetry.addData("Spd full", spindexer.isFull());
             telemetry.addData("Spd ejecting", ejecting);
             telemetry.addData("Spd slot[0]", s[0]);
             telemetry.addData("Spd slot[1]", s[1]);
             telemetry.addData("Spd slot[2]", s[2]);
+            spindexer.debugAbsAngle(telemetry);
+
 
             telemetry.addData("Shooter On", shooter.isOn());
             telemetry.addData("Target RPM", "%.0f", shooter.getTargetRpm());
