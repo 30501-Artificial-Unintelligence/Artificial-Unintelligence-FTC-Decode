@@ -48,7 +48,7 @@ public class SpindexerSubsystem {
     // which slot index is currently "at intake" (0,1,2)
     private int intakeIndex = 0;
 
-    // pattern first eject index
+    // pattern first eject index (used by some helper methods)
     private int ejectStartIndex = 0;
 
     private final Ball[] slots = new Ball[SLOT_COUNT];
@@ -57,6 +57,12 @@ public class SpindexerSubsystem {
     private boolean lastBallPresent = false;
     private boolean pendingAutoRotate = false;
     private long autoRotateTimeMs = 0;
+
+    // Eject sequence state (moved from TeleOp)
+    private boolean ejecting = false;
+    private int ejectSlotIndex = 0;
+    private long ejectPhaseTime = 0;
+    private int ejectPhase = 0; // 0 = find/rotate, 1 = wait before loader, 2 = wait after loader
 
     public SpindexerSubsystem(HardwareMap hardwareMap) {
         motor = hardwareMap.get(DcMotorEx.class, "spindexerMotor");
@@ -93,6 +99,12 @@ public class SpindexerSubsystem {
         return (angleDeg % 360.0 + 360.0) % 360.0;
     }
 
+    private double smallestAngleDiff(double a, double b) {
+        double diff = a - b;
+        diff = (diff + 540.0) % 360.0 - 180.0; // wrap to [-180, 180)
+        return diff;
+    }
+
     /**
      * Use the absolute encoder to align the encoder ticks with the real mechanical angle.
      *
@@ -110,7 +122,6 @@ public class SpindexerSubsystem {
         int currentTicks = motor.getCurrentPosition();
         int internalTicks = (int) Math.round((internalAngle / 360.0) * TICKS_PER_REV);
 
-        // ticksToAngle(currentTicks) should return internalAngle, so:
         // internalAngle = (currentTicks - zeroTicks) * 360 / TICKS_PER_REV
         // => zeroTicks = currentTicks - internalTicks
         zeroTicks = currentTicks - internalTicks;
@@ -122,26 +133,13 @@ public class SpindexerSubsystem {
         intakeIndex = nearestIndex;
     }
 
-    private double smallestAngleDiff(double a, double b) {
-        double diff = a - b;
-        diff = (diff + 540.0) % 360.0 - 180.0; // wrap to [-180, 180)
-        return diff;
-    }
-
     // ===== Angle / encoder helpers =====
-
-    private int angleToTicks(double angleDeg) {
-        double norm = normalizeAngle(angleDeg);
-        double revs = norm / 360.0;
-        return zeroTicks + (int) Math.round(revs * TICKS_PER_REV);
-    }
 
     private double ticksToAngle(int ticks) {
         int relTicks = ticks - zeroTicks;
         double revs = relTicks / TICKS_PER_REV;
         double angle = revs * 360.0;
-        angle = normalizeAngle(angle);
-        return angle;
+        return normalizeAngle(angle);
     }
 
     /**
@@ -150,6 +148,29 @@ public class SpindexerSubsystem {
      */
     public double getCurrentAngleDeg() {
         return ticksToAngle(motor.getCurrentPosition());
+    }
+
+    /**
+     * Compute the motor tick target for a given angle so that
+     * the motor takes the SHORTEST path from its current tick position.
+     */
+    private int shortestTicksToAngle(double angleDeg) {
+        double norm = normalizeAngle(angleDeg);
+
+        // "Canonical" tick for this angle (somewhere on the infinite shaft)
+        double desiredRevs = norm / 360.0;
+        int baseTicks = zeroTicks + (int)Math.round(desiredRevs * TICKS_PER_REV);
+
+        int current = motor.getCurrentPosition();
+        int revTicks = (int)Math.round(TICKS_PER_REV);
+
+        int diff = baseTicks - current;  // how far we'd move if we used baseTicks directly
+
+        // Shift by an integer number of full revs so |diff'| is minimized
+        int k = (int)Math.round((double)diff / revTicks);
+
+        int bestTarget = baseTicks - k * revTicks;  // new target with minimal travel
+        return bestTarget;
     }
 
     private void runToAngleBlocking(double angleDeg, double power) {
@@ -174,8 +195,6 @@ public class SpindexerSubsystem {
         motor.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
     }
 
-
-
     // === PUBLIC ANGLE API ===
 
     /** Move to an absolute angle (0, 30, 180, etc.) blocking up to timeout. */
@@ -194,22 +213,21 @@ public class SpindexerSubsystem {
         motor.setMode(DcMotor.RunMode.RUN_TO_POSITION);
         motor.setPower(power);
     }
-    private void moveSlotToIntake(int slotIndex, double power) {
-        double angle = slotCenterAngleAtIntake(slotIndex); // 0, 120, 240
-        runToAngleBlocking(angle, power);                  // shortest path between slots
-        intakeIndex = slotIndex;
-    }
-
-    private void moveSlotToLoad(int slotIndex, double power) {
-        double angle = slotCenterAngleAtIntake(slotIndex) + (LOAD_ANGLE - INTAKE_ANGLE);
-        runToAngleBlocking(angle, power);                  // also shortest path
-    }
-
 
     private double slotCenterAngleAtIntake(int slotIndex) {
         return INTAKE_ANGLE + slotIndex * DEGREES_PER_SLOT;
     }
 
+    private void moveSlotToIntake(int slotIndex, double power) {
+        double angle = slotCenterAngleAtIntake(slotIndex);
+        runToAngleBlocking(angle, power);
+        intakeIndex = slotIndex;
+    }
+
+    private void moveSlotToLoad(int slotIndex, double power) {
+        double angle = slotCenterAngleAtIntake(slotIndex) + (LOAD_ANGLE - INTAKE_ANGLE);
+        runToAngleBlocking(angle, power);
+    }
 
     // ===== Color / ball handling =====
 
@@ -252,7 +270,24 @@ public class SpindexerSubsystem {
         autoRotateTimeMs = System.currentTimeMillis() + 100;
     }
 
-    public void update(Telemetry telemetry) {
+    // ===== MAIN UPDATE: auto-intake + ejection =====
+    //
+    // Call this every loop from TeleOp.
+    //  - telemetry: for debug prints
+    //  - loader:    so we can start loader cycles during eject
+    //  - yEdge:     true only on rising edge of Y
+    public void update(Telemetry telemetry,
+                       LoaderSubsystem loader,
+                       boolean yEdge) {
+
+        // --- Handle eject button press (start sequence if we have balls) ---
+        if (yEdge && !ejecting && hasAnyBall()) {
+            ejecting = true;
+            ejectSlotIndex = 0;
+            ejectPhase = 0;
+        }
+
+        // --- Auto-intake (same as your old update) ---
         if (!isFull()) {
             double distCm = intakeColor.getDistance(DistanceUnit.CM);
             boolean ballPresent = distCm <= 2.0;
@@ -269,8 +304,9 @@ public class SpindexerSubsystem {
             lastBallPresent = ballPresent;
         }
 
+        // --- Pending auto-rotate (non-blocking, shortest-path) ---
         if (pendingAutoRotate && System.currentTimeMillis() >= autoRotateTimeMs) {
-            if (!motor.isBusy()) {
+            if (!motor.isBusy()) {  // Only start if motor is free
                 pendingAutoRotate = false;
                 int nextIndex = (intakeIndex + 1) % SLOT_COUNT;
 
@@ -280,12 +316,48 @@ public class SpindexerSubsystem {
                 motor.setMode(DcMotor.RunMode.RUN_TO_POSITION);
                 motor.setPower(MOVE_POWER);
 
-
                 intakeIndex = nextIndex;
+            }
+        }
+
+        // --- Eject sequence state machine (moved from TeleOp) ---
+        if (ejecting) {
+            long now = System.currentTimeMillis();
+
+            if (ejectPhase == 0) {
+                // Find next non-empty slot
+                if (ejectSlotIndex >= SLOT_COUNT || !hasAnyBall()) {
+                    // Done ejecting: go back so slot 0 is at the intake position
+                    homeToIntake();
+                    ejecting = false;
+                } else if (!slotHasBall(ejectSlotIndex)) {
+                    // Skip empty slot
+                    ejectSlotIndex++;
+                } else {
+                    // Rotate this slot to LOAD (blocking move with timeout)
+                    moveSlotToLoadBlocking(ejectSlotIndex);
+                    ejectPhaseTime = now + 100; // wait 0.1s before loader fires
+                    ejectPhase = 1;
+                }
+            } else if (ejectPhase == 1) {
+                // After 0.1s at LOAD, fire the loader
+                if (now >= ejectPhaseTime) {
+                    loader.startCycle();
+                    ejectPhaseTime = now + 100; // wait another 0.1s after firing
+                    ejectPhase = 2;
+                }
+            } else if (ejectPhase == 2) {
+                // After extra 0.1s, mark slot empty and move to next
+                if (now >= ejectPhaseTime) {
+                    clearSlot(ejectSlotIndex);
+                    ejectSlotIndex++;
+                    ejectPhase = 0;
+                }
             }
         }
     }
 
+    // We "have three balls" if all slots are non-EMPTY.
     public boolean hasThreeBalls() {
         for (Ball b : slots) {
             if (b == Ball.EMPTY) return false;
@@ -297,56 +369,8 @@ public class SpindexerSubsystem {
         return "2P + 1G";
     }
 
-    public boolean prepareFirstEjectByPattern(Telemetry telemetry) {
-        if (!hasThreeBalls()) {
-            telemetry.addLine("Not 3 balls yet; can't prep eject.");
-            return false;
-        }
-
-        int bestIndex = -1;
-        for (int i = 0; i < SLOT_COUNT; i++) {
-            Ball a = slots[i];
-            Ball b = slots[(i + 1) % SLOT_COUNT];
-            Ball c = slots[(i + 2) % SLOT_COUNT];
-
-            if (a == Ball.PURPLE && b == Ball.GREEN && c == Ball.PURPLE) {
-                bestIndex = i;
-                break;
-            }
-        }
-
-        if (bestIndex == -1) {
-            bestIndex = intakeIndex;
-            telemetry.addLine("Pattern not perfect; starting eject from intakeIndex.");
-        } else {
-            telemetry.addData("Pattern", "Using P-G-P starting at slot %d", bestIndex);
-        }
-
-        ejectStartIndex = bestIndex;
-        moveSlotToLoad(ejectStartIndex, MOVE_POWER);
-        telemetry.addData("Prepared", "Slot %d at LOAD (180°)", ejectStartIndex);
-
-        return true;
-    }
-
-    public void ejectAllByPattern(Telemetry telemetry) {
-        for (int i = 0; i < SLOT_COUNT; i++) {
-            int slotIndex = (ejectStartIndex + i) % SLOT_COUNT;
-
-            moveSlotToLoad(slotIndex, MOVE_POWER);
-            telemetry.addData("Eject", "Slot %d at LOAD", slotIndex);
-            telemetry.update();
-
-            slots[slotIndex] = Ball.EMPTY;
-
-            try {
-                Thread.sleep(150);
-            } catch (InterruptedException ignored) {
-            }
-        }
-
-        moveSlotToIntake(0, MOVE_POWER);
-        intakeIndex = 0;
+    public void moveSlotToLoadBlocking(int slotIndex) {
+        moveSlotToLoad(slotIndex, MOVE_POWER);
     }
 
     public void rezeroHere() {
@@ -358,11 +382,9 @@ public class SpindexerSubsystem {
         double desiredAngle = slotCenterAngleAtIntake(ejectStartIndex) + (LOAD_ANGLE - INTAKE_ANGLE);
         double currentAngle = getCurrentAngleDeg();
         double diff = smallestAngleDiff(currentAngle, normalizeAngle(desiredAngle));
-        // translate angle tolerance to ticks, or just use a degree threshold:
-        double tolDeg = 360.0 * TOLERANCE_TICKS / TICKS_PER_REV; // same as your tick tolerance
+        double tolDeg = 360.0 * TOLERANCE_TICKS / TICKS_PER_REV;
         return Math.abs(diff) < tolDeg;
     }
-
 
     // ==== Debug getters for telemetry ====
 
@@ -404,18 +426,21 @@ public class SpindexerSubsystem {
         slots[slotIndex] = Ball.EMPTY;
     }
 
-    public void moveSlotToLoadBlocking(int slotIndex) {
-        moveSlotToLoad(slotIndex, MOVE_POWER);
-    }
-
+    // Which slot the code thinks is at the INTAKE position
     public int getIntakeSlotIndex() {
         return intakeIndex;
     }
 
+    // Are we in the middle of a pending auto-rotate (from auto-intake)?
     public boolean isAutoRotating() {
         return pendingAutoRotate;
     }
 
+    public boolean isEjecting() {
+        return ejecting;
+    }
+
+    // Convenience: move back so slot 0 is at intake
     public void homeToIntake() {
         moveSlotToIntake(0, MOVE_POWER);
     }
@@ -430,28 +455,4 @@ public class SpindexerSubsystem {
         telemetry.addData("Abs offset", "%.1f deg", ABS_MECH_OFFSET_DEG);
         telemetry.addData("Intake slot index", intakeIndex);
     }
-    /**
-     * Compute the motor tick target for a given angle so that
-     * the motor takes the SHORTEST path from its current tick position.
-     */
-    private int shortestTicksToAngle(double angleDeg) {
-        double norm = normalizeAngle(angleDeg);
-
-        // "Canonical" tick for this angle (somewhere on the infinite shaft)
-        double desiredRevs = norm / 360.0;
-        int baseTicks = zeroTicks + (int)Math.round(desiredRevs * TICKS_PER_REV);
-
-        int current = motor.getCurrentPosition();
-        int revTicks = (int)Math.round(TICKS_PER_REV);
-
-        int diff = baseTicks - current;  // how far we'd move if we used baseTicks directly
-
-        // Shift by an integer number of full revs so |diff'| is minimized
-        // k ≈ diff / revTicks, rounded to nearest integer
-        int k = (int)Math.round((double)diff / revTicks);
-
-        int bestTarget = baseTicks - k * revTicks;  // new target with minimal travel
-        return bestTarget;
-    }
-
 }
