@@ -20,11 +20,11 @@ public class SpindexerSubsystem {
 
     // ==== MOTOR / GEOMETRY CONSTANTS ====
 
-    // goBILDA 435 rpm YJ
+    // goBILDA 435 rpm YJ integrated encoder
     private static final double TICKS_PER_REV = 383.6;
     private static final double DEGREES_PER_SLOT = 120.0;
-    private static final double INTAKE_ANGLE = 0.0;
-    private static final double LOAD_ANGLE = 180.0;
+    private static final double INTAKE_ANGLE = 0.0;   // "home" angle
+    private static final double LOAD_ANGLE   = 180.0;
     private static final int SLOT_COUNT = 3;
     private static final int TOLERANCE_TICKS = 10;
     private static final double MOVE_POWER = 0.5;
@@ -33,6 +33,7 @@ public class SpindexerSubsystem {
     private static final double ABS_VREF = 3.3; // REV analog reference
 
     // Raw abs angle (deg) when SLOT 0 is perfectly at intake (you measured this)
+    // i.e. absRaw == 260.7°  <=>  internal angle == 0°
     private static final double ABS_MECH_OFFSET_DEG = 260.7;
 
     // ==== HARDWARE ====
@@ -87,37 +88,38 @@ public class SpindexerSubsystem {
         return angle;
     }
 
+    /** normalize any angle to [0, 360) */
+    private double normalizeAngle(double angleDeg) {
+        return (angleDeg % 360.0 + 360.0) % 360.0;
+    }
+
     /**
-     * Use the absolute encoder to figure out which slot is at intake,
-     * and set zeroTicks so angleToTicks(slotCenterAngle) == current motor pos.
+     * Use the absolute encoder to align the encoder ticks with the real mechanical angle.
+     *
+     * - We define internalAngle = 0° when absRaw == ABS_MECH_OFFSET_DEG (slot 0 at intake).
+     * - internalAngle increases with rotation, 360° per rev.
+     * - We solve for zeroTicks so that ticksToAngle(currentTicks) == internalAngle.
+     * - We also estimate which slot is currently at intake.
      */
     private void autoZeroFromAbs() {
-        // Read raw abs angle and apply mechanical offset (slot 0 at intake = 260.7°)
-        double angle = getAbsAngleDeg() - ABS_MECH_OFFSET_DEG;
+        double absRaw = getAbsAngleDeg();
 
-        // Normalize to [0,360)
-        angle = (angle % 360.0 + 360.0) % 360.0;
-
-        // Slot centers in our internal frame: 0, 120, 240
-        double[] centers = {0.0, 120.0, 240.0};
-
-        int bestIndex = 0;
-        double bestError = 9999;
-
-        for (int i = 0; i < centers.length; i++) {
-            double err = smallestAngleDiff(angle, centers[i]);
-            if (Math.abs(err) < bestError) {
-                bestError = Math.abs(err);
-                bestIndex = i;
-            }
-        }
-
-        intakeIndex = bestIndex;
-        double bestCenter = centers[bestIndex];
+        // internalAngle = 0 when absRaw == ABS_MECH_OFFSET_DEG
+        double internalAngle = normalizeAngle(absRaw - ABS_MECH_OFFSET_DEG);
 
         int currentTicks = motor.getCurrentPosition();
-        int expectedOffset = (int) Math.round((bestCenter / 360.0) * TICKS_PER_REV);
-        zeroTicks = currentTicks - expectedOffset;
+        int internalTicks = (int) Math.round((internalAngle / 360.0) * TICKS_PER_REV);
+
+        // ticksToAngle(currentTicks) should return internalAngle, so:
+        // internalAngle = (currentTicks - zeroTicks) * 360 / TICKS_PER_REV
+        // => zeroTicks = currentTicks - internalTicks
+        zeroTicks = currentTicks - internalTicks;
+
+        // Figure out which slot is closest to intake (internalAngle 0,120,240)
+        double slotIndexF = internalAngle / DEGREES_PER_SLOT; // 0..3
+        int nearestIndex = (int) Math.round(slotIndexF) % SLOT_COUNT;
+        if (nearestIndex < 0) nearestIndex += SLOT_COUNT;
+        intakeIndex = nearestIndex;
     }
 
     private double smallestAngleDiff(double a, double b) {
@@ -129,12 +131,25 @@ public class SpindexerSubsystem {
     // ===== Angle / encoder helpers =====
 
     private int angleToTicks(double angleDeg) {
-        double revs = angleDeg / 360.0;
+        double norm = normalizeAngle(angleDeg);
+        double revs = norm / 360.0;
         return zeroTicks + (int) Math.round(revs * TICKS_PER_REV);
     }
 
-    private double slotCenterAngleAtIntake(int slotIndex) {
-        return INTAKE_ANGLE + slotIndex * DEGREES_PER_SLOT;
+    private double ticksToAngle(int ticks) {
+        int relTicks = ticks - zeroTicks;
+        double revs = relTicks / TICKS_PER_REV;
+        double angle = revs * 360.0;
+        angle = normalizeAngle(angle);
+        return angle;
+    }
+
+    /**
+     * Angle estimated from motor encoder, in degrees [0, 360).
+     * 0° = slot 0 at intake (raw abs ≈ 260.7°).
+     */
+    public double getCurrentAngleDeg() {
+        return ticksToAngle(motor.getCurrentPosition());
     }
 
     private void runToAngleBlocking(double angleDeg, double power) {
@@ -144,7 +159,7 @@ public class SpindexerSubsystem {
         motor.setPower(power);
 
         long startTime = System.currentTimeMillis();
-        long timeoutMs = 500;  // max time we’ll wait for this move
+        long timeoutMs = 700;  // max time we’ll wait for this move
 
         while (motor.isBusy()
                 && (System.currentTimeMillis() - startTime) < timeoutMs) {
@@ -157,6 +172,29 @@ public class SpindexerSubsystem {
 
         motor.setPower(0);
         motor.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
+    }
+
+    // === PUBLIC ANGLE API ===
+
+    /** Move to an absolute angle (0, 30, 180, etc.) blocking up to timeout. */
+    public void moveToAngleBlocking(double angleDeg) {
+        runToAngleBlocking(angleDeg, MOVE_POWER);
+    }
+
+    public void moveToAngleBlocking(double angleDeg, double power) {
+        runToAngleBlocking(angleDeg, power);
+    }
+
+    /** Non-blocking move to an absolute angle. */
+    public void moveToAngleAsync(double angleDeg, double power) {
+        int target = angleToTicks(angleDeg);
+        motor.setTargetPosition(target);
+        motor.setMode(DcMotor.RunMode.RUN_TO_POSITION);
+        motor.setPower(power);
+    }
+
+    private double slotCenterAngleAtIntake(int slotIndex) {
+        return INTAKE_ANGLE + slotIndex * DEGREES_PER_SLOT;
     }
 
     private void moveSlotToIntake(int slotIndex, double power) {
@@ -192,43 +230,26 @@ public class SpindexerSubsystem {
         double gn = g / (double) sum;
         double bn = b / (double) sum;
 
-        // If green channel dominates strongly → GREEN
         if (gn > rn + 0.10 && gn > bn + 0.10) {
             return Ball.GREEN;
         }
 
-        // Otherwise, treat as PURPLE (any non-green ball)
         return Ball.PURPLE;
     }
 
-    /**
-     * Called when X is pressed (manual intake):
-     *  1) ensure current slot is at intake
-     *  2) read color into that slot
-     *  3) schedule a rotate to next slot after 0.1s
-     */
     public void intakeOne(Telemetry telemetry) {
-        // 1. Make sure current slot is aligned at intake
         moveSlotToIntake(intakeIndex, MOVE_POWER);
 
-        // 2. Read color
         Ball color = detectBallColor();
         slots[intakeIndex] = color;
 
         telemetry.addData("Intake", "Slot %d = %s", intakeIndex, color);
 
-        // 3. After a short delay, auto-rotate to next slot
         pendingAutoRotate = true;
         autoRotateTimeMs = System.currentTimeMillis() + 100;
     }
 
-    /**
-     * Auto-intake update: call this every loop from TeleOp.
-     * - Automatically detect a ball at intake using distance + color.
-     * - After a ball is stored in the current slot, rotate to next slot.
-     */
     public void update(Telemetry telemetry) {
-        // 1) Auto-intake if not full
         if (!isFull()) {
             double distCm = intakeColor.getDistance(DistanceUnit.CM);
             boolean ballPresent = distCm <= 2.0;
@@ -245,13 +266,11 @@ public class SpindexerSubsystem {
             lastBallPresent = ballPresent;
         }
 
-        // 2) Handle pending auto-rotate (non-blocking)
         if (pendingAutoRotate && System.currentTimeMillis() >= autoRotateTimeMs) {
-            if (!motor.isBusy()) {  // Only start if motor is free
+            if (!motor.isBusy()) {
                 pendingAutoRotate = false;
                 int nextIndex = (intakeIndex + 1) % SLOT_COUNT;
 
-                // Non-blocking move: let RUN_TO_POSITION handle it
                 double angle = slotCenterAngleAtIntake(nextIndex);
                 int target = angleToTicks(angle);
                 motor.setTargetPosition(target);
@@ -263,7 +282,6 @@ public class SpindexerSubsystem {
         }
     }
 
-    // We "have three balls" if all slots are non-EMPTY.
     public boolean hasThreeBalls() {
         for (Ball b : slots) {
             if (b == Ball.EMPTY) return false;
@@ -271,23 +289,16 @@ public class SpindexerSubsystem {
         return true;
     }
 
-    // Game pattern string (for telemetry only)
     public String getGamePattern() {
         return "2P + 1G";
     }
 
-    /**
-     * Pick a first eject slot that makes sense for the pattern.
-     * For now: prefer GREEN in the middle (P-G-P), but if not, just pick intakeIndex.
-     * Moves that slot to the LOAD position (180° from intake).
-     */
     public boolean prepareFirstEjectByPattern(Telemetry telemetry) {
         if (!hasThreeBalls()) {
             telemetry.addLine("Not 3 balls yet; can't prep eject.");
             return false;
         }
 
-        // Try to find a P-G-P sequence (cyclic)
         int bestIndex = -1;
         for (int i = 0; i < SLOT_COUNT; i++) {
             Ball a = slots[i];
@@ -295,14 +306,12 @@ public class SpindexerSubsystem {
             Ball c = slots[(i + 2) % SLOT_COUNT];
 
             if (a == Ball.PURPLE && b == Ball.GREEN && c == Ball.PURPLE) {
-                // eject order: P (i), G (i+1), P (i+2)
                 bestIndex = i;
                 break;
             }
         }
 
         if (bestIndex == -1) {
-            // Fall back: just start from whatever slot is currently at intake
             bestIndex = intakeIndex;
             telemetry.addLine("Pattern not perfect; starting eject from intakeIndex.");
         } else {
@@ -310,38 +319,28 @@ public class SpindexerSubsystem {
         }
 
         ejectStartIndex = bestIndex;
-
-        // Move that slot to LOAD position (180° from intake)
         moveSlotToLoad(ejectStartIndex, MOVE_POWER);
         telemetry.addData("Prepared", "Slot %d at LOAD (180°)", ejectStartIndex);
 
         return true;
     }
 
-    /**
-     * Eject all 3 in pattern order, always putting the current eject slot
-     * at LOAD (180°). Afterward, slot 0 is returned to intake.
-     */
     public void ejectAllByPattern(Telemetry telemetry) {
         for (int i = 0; i < SLOT_COUNT; i++) {
             int slotIndex = (ejectStartIndex + i) % SLOT_COUNT;
 
-            // Move slotIndex to load position
             moveSlotToLoad(slotIndex, MOVE_POWER);
             telemetry.addData("Eject", "Slot %d at LOAD", slotIndex);
             telemetry.update();
 
-            // Here, your loader mechanism would fire.
-            // We just mark it empty:
             slots[slotIndex] = Ball.EMPTY;
 
             try {
-                Thread.sleep(150); // small pause for your loader, tune as needed
+                Thread.sleep(150);
             } catch (InterruptedException ignored) {
             }
         }
 
-        // After all ejected, rotate back so that slot 0 is at intake
         moveSlotToIntake(0, MOVE_POWER);
         intakeIndex = 0;
     }
@@ -352,7 +351,6 @@ public class SpindexerSubsystem {
     }
 
     public boolean isAtMid() {
-        // "Mid" here = LOAD position for the currently selected ejectStartIndex
         double angle = slotCenterAngleAtIntake(ejectStartIndex) + (LOAD_ANGLE - INTAKE_ANGLE);
         int target = angleToTicks(angle);
         return Math.abs(motor.getCurrentPosition() - target) < TOLERANCE_TICKS;
@@ -402,26 +400,25 @@ public class SpindexerSubsystem {
         moveSlotToLoad(slotIndex, MOVE_POWER);
     }
 
-    // Which slot the code thinks is at the INTAKE position
     public int getIntakeSlotIndex() {
         return intakeIndex;
     }
 
-    // Are we in the middle of a pending auto-rotate (from auto-intake)?
     public boolean isAutoRotating() {
         return pendingAutoRotate;
     }
 
-    // Convenience: move back so slot 0 is at intake
     public void homeToIntake() {
         moveSlotToIntake(0, MOVE_POWER);
     }
 
     public void debugAbsAngle(Telemetry telemetry) {
         double raw = getAbsAngleDeg();
-        double corrected = (raw - ABS_MECH_OFFSET_DEG + 360.0) % 360.0;
+        double corrected = normalizeAngle(raw - ABS_MECH_OFFSET_DEG);
+        double encAngle = getCurrentAngleDeg();
         telemetry.addData("Abs raw", "%.1f deg", raw);
-        telemetry.addData("Abs corr", "%.1f deg", corrected);
+        telemetry.addData("Abs corr (slot0@intake=0)", "%.1f deg", corrected);
+        telemetry.addData("Enc angle", "%.1f deg", encAngle);
         telemetry.addData("Abs offset", "%.1f deg", ABS_MECH_OFFSET_DEG);
         telemetry.addData("Intake slot index", intakeIndex);
     }

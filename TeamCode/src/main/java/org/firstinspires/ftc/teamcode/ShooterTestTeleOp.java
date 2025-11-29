@@ -41,6 +41,8 @@ public class ShooterTestTeleOp extends LinearOpMode {
         waitForStart();
         if (isStopRequested()) return;
 
+        spindexer.homeToIntake();
+
         while (opModeIsActive()) {
             // ===== SHOOTER =====
             shooter.update(
@@ -118,6 +120,7 @@ public class ShooterTestTeleOp extends LinearOpMode {
             telemetry.addData("Spd slot[0]", s[0]);
             telemetry.addData("Spd slot[1]", s[1]);
             telemetry.addData("Spd slot[2]", s[2]);
+            telemetry.addData("Spd angle(enc)", "%.1f", spindexer.getCurrentAngleDeg()); // <--- NEW
             spindexer.debugAbsAngle(telemetry);
 
             telemetry.addData("Shooter On", shooter.isOn());
@@ -125,6 +128,7 @@ public class ShooterTestTeleOp extends LinearOpMode {
             telemetry.addData("Current RPM (est)", "%.0f", shooter.getCurrentRpmEstimate());
 
             telemetry.update();
+
         }
     }
 }
