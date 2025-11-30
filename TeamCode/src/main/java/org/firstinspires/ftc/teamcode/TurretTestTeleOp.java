@@ -34,7 +34,7 @@ public class TurretTestTeleOp extends OpMode {
         // --- Manual override with joystick ---
         double stickX = gamepad1.right_stick_x;
         if (Math.abs(stickX) > 0.05) {
-            turret.setManualPower(stickX * 0.4);  // manual mode, overrides auto
+            turret.setManualPower(stickX * 0.1);  // manual mode, overrides auto
         }
 
         turret.update();

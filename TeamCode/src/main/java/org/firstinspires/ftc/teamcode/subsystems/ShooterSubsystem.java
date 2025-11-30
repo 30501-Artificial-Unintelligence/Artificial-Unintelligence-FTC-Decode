@@ -24,7 +24,7 @@ public class ShooterSubsystem {
     private boolean isOn = false;
 
     // Target speed controlled ONLY by buttons
-    private double targetRpm = 0.0; // start at 0; bump with buttons
+    private double targetRpm = 3800; // start at 0; bump with buttons
 
     // Edge detection
     private boolean lastToggleBtn = false;
@@ -44,7 +44,7 @@ public class ShooterSubsystem {
      * @param increasePressed    e.g., gamepad1.dpad_up (rising edge +250 RPM)
      * @param decreasePressed    e.g., gamepad1.dpad_down (rising edge -250 RPM)
      */
-    public void update(boolean togglePressed, boolean increasePressed, boolean decreasePressed) {
+    public void update(boolean togglePressed, boolean increasePressed, boolean decreasePressed, int fieldPosition) {
         // Toggle on rising edge
         if (togglePressed && !lastToggleBtn) {
             isOn = !isOn;
@@ -60,7 +60,14 @@ public class ShooterSubsystem {
 
         // Apply output
         if (isOn) {
-            motor.setVelocity(rpmToTicksPerSec(targetRpm));
+            if (fieldPosition == 0){
+                motor.setVelocity(rpmToTicksPerSec(targetRpm));
+            }else if (fieldPosition == 1){
+                motor.setVelocity(rpmToTicksPerSec(targetRpm + (4750.0-3800.0)));
+            }else{
+                motor.setVelocity(rpmToTicksPerSec(0.0));
+            }
+
         } else {
             motor.setVelocity(0.0);
         }
@@ -70,6 +77,8 @@ public class ShooterSubsystem {
         lastIncBtn = increasePressed;
         lastDecBtn = decreasePressed;
     }
+
+
 
     private double clampRpm(double rpm) {
         if (rpm < 0) return 0;

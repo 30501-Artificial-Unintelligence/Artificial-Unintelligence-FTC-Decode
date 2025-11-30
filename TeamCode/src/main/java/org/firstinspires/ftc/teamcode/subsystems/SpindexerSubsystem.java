@@ -8,8 +8,11 @@ import com.qualcomm.robotcore.hardware.HardwareMap;
 
 import org.firstinspires.ftc.robotcore.external.Telemetry;
 import org.firstinspires.ftc.robotcore.external.navigation.DistanceUnit;
+import org.firstinspires.ftc.teamcode.subsystems.ShooterSubsystem;
 
 public class SpindexerSubsystem {
+
+    private ShooterSubsystem shooter;
 
     public enum Ball {
         EMPTY,
@@ -63,6 +66,10 @@ public class SpindexerSubsystem {
     private int ejectSlotIndex = 0;
     private long ejectPhaseTime = 0;
     private int ejectPhase = 0; // 0 = find/rotate, 1 = wait before loader, 2 = wait after loader
+
+    //shooter
+    private boolean isOn = false;
+
 
     public SpindexerSubsystem(HardwareMap hardwareMap) {
         motor = hardwareMap.get(DcMotorEx.class, "spindexerMotor");
@@ -276,7 +283,7 @@ public class SpindexerSubsystem {
     //  - telemetry: for debug prints
     //  - loader:    so we can start loader cycles during eject
     //  - yEdge:     true only on rising edge of Y
-    public void update(Telemetry telemetry,
+    public boolean update(Telemetry telemetry,
                        LoaderSubsystem loader,
                        boolean yEdge) {
 
@@ -355,6 +362,9 @@ public class SpindexerSubsystem {
                 }
             }
         }
+
+
+        return isFull();
     }
 
     // We "have three balls" if all slots are non-EMPTY.
