@@ -43,9 +43,9 @@ public class DrivetrainSubsystem {
 
     public void drive (double leftX, double leftY, double rightX){
         //Mecanum Drive using Swyft Drive V2
-        double y = -leftY;       // forward/back
-        double x = leftX;        // strafe
-        double rx = rightX;      // rotation
+        double y = leftY;       // forward/back
+        double x = -leftX;        // strafe
+        double rx = -rightX;      // rotation
 
         double denominator = Math.max(Math.abs(y) + Math.abs(x) + Math.abs(rx), 1);
 
