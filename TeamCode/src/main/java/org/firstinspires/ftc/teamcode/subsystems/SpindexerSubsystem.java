@@ -43,6 +43,7 @@ public class SpindexerSubsystem {
 
     private final DcMotorEx motor;
     private final RevColorSensorV3 intakeColor;
+    private final RevColorSensorV3 intakeColor2;
     private final AnalogInput absEncoder;
 
     // encoder value for angle 0° (intake) when slot 0 is at intake
@@ -74,6 +75,7 @@ public class SpindexerSubsystem {
     public SpindexerSubsystem(HardwareMap hardwareMap) {
         motor = hardwareMap.get(DcMotorEx.class, "spindexerMotor");
         intakeColor = hardwareMap.get(RevColorSensorV3.class, "spindexerIntakeColorSensor1");
+        intakeColor2 = hardwareMap.get(RevColorSensorV3.class,"spindexerIntakeColorSensor1");
         absEncoder = hardwareMap.get(AnalogInput.class, "spindexerAbs"); // must match config name
 
         motor.setMode(DcMotor.RunMode.STOP_AND_RESET_ENCODER);
@@ -241,15 +243,20 @@ public class SpindexerSubsystem {
     private Ball detectBallColor() {
         // Check distance first: only detect if a ball is "close"
         double distCm = intakeColor.getDistance(DistanceUnit.CM);
-        if (distCm > 2.0) {
+        double distCm2 = intakeColor2.getDistance(DistanceUnit.CM);
+        if (distCm > 2.0 ) {
             return Ball.UNKNOWN; // no ball close enough
         }
 
         int r = intakeColor.red();
         int g = intakeColor.green();
         int b = intakeColor.blue();
+        int r2 = intakeColor.red();
+        int g2 = intakeColor.green();
+        int b2 = intakeColor.blue();
 
         int sum = r + g + b;
+        int sum2 = r2 +g2 + b2;
         if (sum < 60) {
             return Ball.UNKNOWN;
         }
@@ -258,7 +265,7 @@ public class SpindexerSubsystem {
         double gn = g / (double) sum;
         double bn = b / (double) sum;
 
-        if (gn > rn + 0.10 && gn > bn + 0.10) {
+        if ((gn > rn + 0.10 && gn > bn + 0.10)) {
             return Ball.GREEN;
         }
 
