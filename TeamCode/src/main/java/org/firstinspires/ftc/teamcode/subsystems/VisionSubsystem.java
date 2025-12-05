@@ -48,7 +48,7 @@ public class VisionSubsystem {
             }
         }
 
-        // None of the three we're interested in
+        // None of the three
         return 0;
     }
 }
