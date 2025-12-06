@@ -88,6 +88,9 @@ public class SpindexerSubsystem {
         return gameTag;
     }
 
+    private static final long WAIT_BEFORE_LOADER_MS = 300;
+    private static final long WAIT_AFTER_LOADER_MS  = 500;
+
 
 
     public SpindexerSubsystem(HardwareMap hardwareMap) {
@@ -106,6 +109,8 @@ public class SpindexerSubsystem {
 
         // One-shot auto-zero at startup using absolute encoder
         autoZeroFromAbs();
+
+        homeToIntake();
     }
 
     // ===== Absolute encoder helpers =====
@@ -484,7 +489,7 @@ public class SpindexerSubsystem {
 
                         // Rotate this slot to LOAD (blocking move with timeout)
                         moveSlotToLoadBlocking(ejectSlotIndex);
-                        ejectPhaseTime = now + 100; // wait 0.1s before loader fires
+                        ejectPhaseTime = now + WAIT_BEFORE_LOADER_MS;
                         ejectPhase = 1;
                     }
                 }
@@ -492,7 +497,7 @@ public class SpindexerSubsystem {
                 // After 0.1s at LOAD, fire the loader
                 if (now >= ejectPhaseTime) {
                     loader.startCycle();
-                    ejectPhaseTime = now + 100; // wait another 0.1s after firing
+                    ejectPhaseTime = now + WAIT_AFTER_LOADER_MS;
                     ejectPhase = 2;
                 }
             } else if (ejectPhase == 2) {
