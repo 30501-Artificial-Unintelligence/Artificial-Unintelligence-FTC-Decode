@@ -44,7 +44,7 @@ public class ShooterSubsystem {
 
     // independent RPMs for near and far
     private double nearRpm = 2700.0;  // tune these on-field
-    private double farRpm  = 3000.0;
+    private double farRpm  = 3300.0;
 
     // edge-detection for RPM buttons (TeleOp sends raw button states)
     private boolean prevRpmUp   = false;

@@ -96,8 +96,17 @@ public class SpindexerSubsystem {
         return gameTag;
     }
 
-    private static final long WAIT_BEFORE_LOADER_MS = 300;
-    private static final long WAIT_AFTER_LOADER_MS  = 500;
+    // If mag was full when we started shooting
+    private static final long WAIT_BEFORE_LOADER_FULL_MS    = 300;
+    // If mag was NOT full when we started shooting (give shooter more spin-up time)
+    private static final long WAIT_BEFORE_LOADER_PARTIAL_MS = 1000;
+
+    private static final long WAIT_AFTER_LOADER_MS  = 700;
+    // Whether the mag was full (3 balls) when this eject sequence started
+    private boolean startedWithFullMag = false;
+
+    private static final double ABS_REZERO_THRESHOLD_DEG = 5.0;
+
 
 
 
@@ -233,6 +242,8 @@ public class SpindexerSubsystem {
 
         motor.setPower(0);
         motor.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
+
+        verifyAndCorrectFromAbs();
     }
 
     // === PUBLIC ANGLE API ===
@@ -544,6 +555,12 @@ public class SpindexerSubsystem {
     //  - telemetry: for debug prints
     //  - loader:    so we can start loader cycles during eject
     //  - yEdge:     true only on rising edge of Y
+// ===== MAIN UPDATE: auto-intake + ejection =====
+//
+// Call this every loop from TeleOp.
+//  - telemetry: for debug prints
+//  - loader:    so we can start loader cycles during eject
+//  - yEdge:     true only on rising edge of Y
     public boolean update(Telemetry telemetry,
                           LoaderSubsystem loader,
                           boolean yEdge,
@@ -561,15 +578,45 @@ public class SpindexerSubsystem {
             gameTag = patternTagOverride;
         }
 
-        // --- Handle eject button press (start sequence if we have balls) ---
-        if (yEdge && !ejecting && hasAnyBall()) {
-            ejecting = true;
-            ejectPhase = 0;
-            patternStep = 0;  // start from the first color in the pattern
+        // --- Handle eject button press ---
+        if (yEdge && !ejecting) {
+
+            if (hasAnyBall()) {
+                // Normal case: we have tracked balls, shoot according to slots[] + pattern
+                ejecting = true;
+                ejectPhase = 0;
+                patternStep = 0;
+                startedWithFullMag = isFull();   // true if we had 3 balls when we started
+
+            } else {
+                // SPECIAL CASE:
+                // No balls *registered* in slots[], but driver wants to
+                // "try to shoot all three" again (in case balls are stuck / misread).
+
+                // Pretend magazine is full so the eject state machine cycles 3 times.
+                Ball[] pattern = getPatternForTag(gameTag);
+                if (pattern != null) {
+                    // If we have a pattern (21/22/23), fake slots by that pattern
+                    for (int i = 0; i < SLOT_COUNT; i++) {
+                        slots[i] = pattern[i];
+                    }
+                } else {
+                    // No pattern (tag = 0) → just pretend all three are PURPLE
+                    for (int i = 0; i < SLOT_COUNT; i++) {
+                        slots[i] = Ball.PURPLE;
+                    }
+                }
+
+                // Start eject sequence just like normal, but mark as "not full"
+                // so first shot uses the longer (1s) spin-up delay.
+                ejecting = true;
+                ejectPhase = 0;
+                patternStep = 0;
+                startedWithFullMag = false;   // force WAIT_BEFORE_LOADER_PARTIAL_MS on first shot
+            }
         }
 
-
-
+        // --- AUTO INTAKE (same as before) ---
         if (!isFull()) {
             boolean ballPresent = isBallPresent();
 
@@ -591,14 +638,11 @@ public class SpindexerSubsystem {
             lastBallPresent = ballPresent;
         }
 
-
-
-
         // --- Pending auto-rotate (non-blocking, shortest-path) ---
         if (pendingAutoRotate && System.currentTimeMillis() >= autoRotateTimeMs) {
             if (!motor.isBusy()) {  // Only start if motor is free
                 pendingAutoRotate = false;
-                int nextIndex = (intakeIndex + 1) % SLOT_COUNT;
+                int nextIndex = (int) ((intakeIndex + 1) % SLOT_COUNT);
 
                 double angle = slotCenterAngleAtIntake(nextIndex);
                 int target = shortestTicksToAngle(angle);
@@ -610,70 +654,90 @@ public class SpindexerSubsystem {
             }
         }
 
-        // --- Eject sequence state machine (moved from TeleOp) ---
+        // --- Eject sequence state machine (unchanged) ---
         if (ejecting) {
             long now = System.currentTimeMillis();
 
-            if (ejectPhase == 0) {
-                // Decide which slot we want to shoot next
-                if (!hasAnyBall()) {
-                    // Nothing left to shoot
-                    homeToIntake();
-                    ejecting = false;
-                } else {
-                    int nextSlot = selectNextEjectSlotIndex();
+            switch (ejectPhase) {
+                case 0:
+                    // Decide which slot we want to shoot next
+                    if (!hasAnyBall()) {
+                        // Nothing left to shoot in our internal model
+                        homeToIntake();
+                        ejecting = false;
+                        startedWithFullMag = false;
+                        break;
+                    }
 
+                    int nextSlot = selectNextEjectSlotIndex();
                     if (nextSlot < 0 || nextSlot >= SLOT_COUNT) {
                         // No valid slot found, bail out safely
                         homeToIntake();
                         ejecting = false;
-                    } else {
-                        ejectSlotIndex = nextSlot;
-
-                        // Rotate this slot to LOAD (blocking move with timeout)
-                        moveSlotToLoadBlocking(ejectSlotIndex);
-                        ejectPhaseTime = now + WAIT_BEFORE_LOADER_MS;
-                        ejectPhase = 1;
-                    }
-                }
-            } else if (ejectPhase == 1) {
-                // After 0.1s at LOAD, fire the loader
-                if (now >= ejectPhaseTime) {
-                    loader.startCycle();
-                    ejectPhaseTime = now + WAIT_AFTER_LOADER_MS;
-                    ejectPhase = 2;
-                }
-            } else if (ejectPhase == 2) {
-                // After extra 0.1s, mark slot empty and either shoot next or finish
-                if (now >= ejectPhaseTime) {
-                    clearSlot(ejectSlotIndex);
-
-                    // If we were using a pattern, advance to the next color step
-                    Ball[] pattern = getPatternForTag(gameTag);
-                    if (pattern != null) {
-                        patternStep++;
+                        startedWithFullMag = false;
+                        break;
                     }
 
-                    boolean usingPattern = (pattern != null);
+                    ejectSlotIndex = nextSlot;
 
-                    // Stop if:
-                    //  - no balls are left, OR
-                    //  - we were following a pattern and we've done all 3 shots
-                    if (!hasAnyBall() ||
-                            (usingPattern && patternStep >= pattern.length)) {
-                        homeToIntake();
-                        ejecting = false;
-                    } else {
-                        ejectPhase = 0; // continue to next shot
+                    // Rotate this slot to LOAD (blocking move with timeout)
+                    moveSlotToLoadBlocking(ejectSlotIndex);
+
+                    // First-shot delay depends on whether we started full or not
+                    long delayMs = startedWithFullMag
+                            ? WAIT_BEFORE_LOADER_FULL_MS     // mag was full → short delay
+                            : WAIT_BEFORE_LOADER_PARTIAL_MS; // mag not full → 1s spin-up
+
+                    ejectPhaseTime = now + delayMs;
+                    ejectPhase = 1;
+                    break;
+
+                case 1:
+                    // After delay at LOAD, fire the loader
+                    if (now >= ejectPhaseTime) {
+                        loader.startCycle();
+                        ejectPhaseTime = now + WAIT_AFTER_LOADER_MS;
+                        ejectPhase = 2;
                     }
-                }
+                    break;
+
+                case 2:
+                    // After extra delay, mark slot empty and decide if we continue
+                    if (now >= ejectPhaseTime) {
+                        clearSlot(ejectSlotIndex);
+
+                        // If we were using a pattern, advance to the next color step
+                        Ball[] pattern = getPatternForTag(gameTag);
+                        if (pattern != null) {
+                            patternStep++;
+                        }
+                        boolean usingPattern = (pattern != null);
+
+                        // Stop if:
+                        //  - no balls are left, OR
+                        //  - we were following a pattern and have fired all 3 shots
+                        if (!hasAnyBall() ||
+                                (usingPattern && patternStep >= pattern.length)) {
+
+                            homeToIntake();
+                            ejecting = false;
+                            startedWithFullMag = false;
+                        } else {
+                            // Continue to next shot
+                            ejectPhase = 0;
+                        }
+                    }
+                    break;
             }
         }
 
-
+        if (!motor.isBusy() && !ejecting && !pendingAutoRotate) {
+            verifyAndCorrectFromAbs();
+        }
 
         return isFull();
     }
+
 
     // We "have three balls" if all slots are non-EMPTY.
     public boolean hasThreeBalls() {
@@ -785,4 +849,116 @@ public class SpindexerSubsystem {
         telemetry.addData("Abs offset", "%.1f deg", ABS_MECH_OFFSET_DEG);
         telemetry.addData("Intake slot index", intakeIndex);
     }
+
+    /**
+     * AUTO-ONLY helper: eject everything we *think* we have, in no particular order.
+     * Blocks the thread until all non-empty slots have been sent to the loader.
+     *
+     * Uses the "fastest non-empty slot" logic each time.
+     */
+    public void ejectAllSlotsAuto(LoaderSubsystem loader) {
+        // Make sure we aren't in the middle of a TeleOp eject sequence
+        ejecting = false;
+        ejectPhase = 0;
+        patternStep = 0;
+        startedWithFullMag = false;
+
+        while (hasAnyBall()) {
+            // Pick the closest non-empty slot to rotate to LOAD
+            double currentAngle = getCurrentAngleDeg();
+            int slot = selectFastestNonEmptySlot(currentAngle);
+            if (slot < 0 || slot >= SLOT_COUNT) {
+                break; // nothing valid, bail out
+            }
+
+            // Rotate that slot to LOAD
+            moveSlotToLoadBlocking(slot);
+
+            // Small delay for things to settle before loader moves
+            try {
+                Thread.sleep(WAIT_BEFORE_LOADER_FULL_MS);
+            } catch (InterruptedException e) {
+                // ignore
+            }
+
+            // Fire loader once
+            loader.startCycle();
+
+            // Wait for loader to push & retract
+            try {
+                Thread.sleep(WAIT_AFTER_LOADER_MS);
+            } catch (InterruptedException e) {
+                // ignore
+            }
+
+            // Mark that slot as empty in our internal model
+            clearSlot(slot);
+        }
+
+        // When done, go back to home position
+        homeToIntake();
+    }
+
+    /**
+     * Force-mark the current intake slot as a GREEN ball.
+     * Use this if there is clearly a green ball at the intake
+     * that the color/distance sensors failed to register.
+     */
+    public void forceIntakeSlotGreen(Telemetry telemetry) {
+        // Only overwrite if this slot is currently empty
+        if (slots[intakeIndex] == Ball.EMPTY) {
+            slots[intakeIndex] = Ball.GREEN;
+
+            telemetry.addData("ForceIntake", "Slot %d forced to GREEN", intakeIndex);
+
+            // mimic normal auto-intake behavior: schedule auto-rotate
+            pendingAutoRotate = true;
+            autoRotateTimeMs = System.currentTimeMillis() + 100;
+        } else {
+            telemetry.addData("ForceIntake", "Slot %d not empty (=%s), ignore force GREEN",
+                    intakeIndex, slots[intakeIndex]);
+        }
+    }
+
+    /**
+     * Force-mark the current intake slot as a PURPLE ball.
+     * Use this if there is clearly a purple ball at the intake
+     * that the color/distance sensors failed to register.
+     */
+    public void forceIntakeSlotPurple(Telemetry telemetry) {
+        if (slots[intakeIndex] == Ball.EMPTY) {
+            slots[intakeIndex] = Ball.PURPLE;
+
+            telemetry.addData("ForceIntake", "Slot %d forced to PURPLE", intakeIndex);
+
+            // mimic normal auto-intake behavior: schedule auto-rotate
+            pendingAutoRotate = true;
+            autoRotateTimeMs = System.currentTimeMillis() + 100;
+        } else {
+            telemetry.addData("ForceIntake", "Slot %d not empty (=%s), ignore force PURPLE",
+                    intakeIndex, slots[intakeIndex]);
+        }
+    }
+
+    /**
+     * Compare encoder-based angle vs abs-encoder-based angle.
+     * If they disagree by more than ABS_REZERO_THRESHOLD_DEG,
+     * re-run autoZeroFromAbs() to snap zeroTicks + intakeIndex to the abs encoder.
+     */
+    private void verifyAndCorrectFromAbs() {
+        // Abs angle in the same 0° frame as internal angle (slot0@intake = 0°)
+        double absRaw = getAbsAngleDeg();
+        double absInternal = normalizeAngle(absRaw - ABS_MECH_OFFSET_DEG);
+
+        // Current internal angle based on motor encoder
+        double encInternal = getCurrentAngleDeg();
+
+        double diff = smallestAngleDiff(encInternal, absInternal);
+
+        if (Math.abs(diff) > ABS_REZERO_THRESHOLD_DEG) {
+            // We're out of sync → trust abs encoder and recompute zeroTicks + intakeIndex
+            autoZeroFromAbs();
+        }
+    }
+
 }
