@@ -97,6 +97,8 @@ public class ShooterTestTeleOp extends LinearOpMode {
             loader.updateLoader();
             */
 
+            loader.updateLoader();
+
             // ===== INTAKE =====
             if (intakeOn) {
                 intake.startIntake();
@@ -108,7 +110,8 @@ public class ShooterTestTeleOp extends LinearOpMode {
             boolean yEdge = gamepad1.y && !lastY;
             lastY = gamepad1.y;
 
-            spindexerIsFull= spindexer.update(telemetry, loader, yEdge);
+
+            spindexerIsFull = spindexer.update(telemetry, loader, yEdge);
 
             if (spindexerIsFull) {
                 shooterOn = true;

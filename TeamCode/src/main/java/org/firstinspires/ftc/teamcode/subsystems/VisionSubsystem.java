@@ -17,7 +17,7 @@ public class VisionSubsystem {
         limelight3A.setPollRateHz(100);
 
         // Your AprilTag pipeline index
-        limelight3A.pipelineSwitch(8);
+        limelight3A.pipelineSwitch(0);
 
         limelight3A.start();
     }

@@ -37,12 +37,13 @@ public class SpindexerSubsystem {
 
     // Raw abs angle (deg) when SLOT 0 is perfectly at intake (you measured this)
     // i.e. absRaw == 260.7°  <=>  internal angle == 0°
-    private static final double ABS_MECH_OFFSET_DEG = 260.7;
+    private static final double ABS_MECH_OFFSET_DEG = 260.8;
 
     // ==== HARDWARE ====
 
     private final DcMotorEx motor;
     private final RevColorSensorV3 intakeColor;
+    private final RevColorSensorV3 intakeColor2;
     private final AnalogInput absEncoder;
 
     // encoder value for angle 0° (intake) when slot 0 is at intake
@@ -70,11 +71,30 @@ public class SpindexerSubsystem {
     //shooter
     private boolean isOn = false;
 
+    // ==== AprilTag / pattern state ====
+    // 23 = P, P, G
+    // 22 = P, G, P
+    // 21 = G, P, P
+    //  0 = no valid tag -> "fastest possible" logic
+    private int gameTag = 0;
+    // index into the 3-shot pattern (0,1,2) while we are in an eject sequence
+    private int patternStep = 0;
+
+    public void setGameTag(int tag) {
+        this.gameTag = tag;
+    }
+
+    public int getGameTag() {
+        return gameTag;
+    }
+
+
 
     public SpindexerSubsystem(HardwareMap hardwareMap) {
         motor = hardwareMap.get(DcMotorEx.class, "spindexerMotor");
         intakeColor = hardwareMap.get(RevColorSensorV3.class, "spindexerIntakeColorSensor1");
-        absEncoder = hardwareMap.get(AnalogInput.class, "spindexerAbs"); // must match config name
+        absEncoder = hardwareMap.get(AnalogInput.class, "spindexerAbs");
+        intakeColor2 = hardwareMap.get(RevColorSensorV3.class, "spindexerIntakeColorSensor2");
 
         motor.setMode(DcMotor.RunMode.STOP_AND_RESET_ENCODER);
         motor.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
@@ -265,17 +285,131 @@ public class SpindexerSubsystem {
         return Ball.PURPLE;
     }
 
-    public void intakeOne(Telemetry telemetry) {
+    /**
+     * Manual "take one" from the intake.
+     *
+     * @param telemetry FTC telemetry
+     * @param tag       Limelight / AprilTag pattern ID:
+     *                  23 = P,P,G; 22 = P,G,P; 21 = G,P,P; 0 = no valid tag
+     */
+    public void intakeOne(Telemetry telemetry, int tag) {
+        // Remember the last tag we saw so the eject logic can use it
+        this.gameTag = tag;
+
         moveSlotToIntake(intakeIndex, MOVE_POWER);
 
         Ball color = detectBallColor();
         slots[intakeIndex] = color;
 
-        telemetry.addData("Intake", "Slot %d = %s", intakeIndex, color);
+        telemetry.addData("Intake", "Slot %d = %s (tag=%d)", intakeIndex, color, gameTag);
 
         pendingAutoRotate = true;
         autoRotateTimeMs = System.currentTimeMillis() + 100;
     }
+
+    // ===== Pattern helpers (AprilTag → desired 3-shot color order) =====
+
+    private Ball[] getPatternForTag(int tag) {
+        Ball[] seq = new Ball[SLOT_COUNT];
+
+        switch (tag) {
+            case 23: // purple, purple, green
+                seq[0] = Ball.PURPLE;
+                seq[1] = Ball.PURPLE;
+                seq[2] = Ball.GREEN;
+                return seq;
+
+            case 22: // purple, green, purple
+                seq[0] = Ball.PURPLE;
+                seq[1] = Ball.GREEN;
+                seq[2] = Ball.PURPLE;
+                return seq;
+
+            case 21: // green, purple, purple
+                seq[0] = Ball.GREEN;
+                seq[1] = Ball.PURPLE;
+                seq[2] = Ball.PURPLE;
+                return seq;
+
+            default:
+                // 0 or anything else = "no valid tag" (no pattern)
+                return null;
+        }
+    }
+
+    /**
+     * Fastest non-empty slot to rotate to LOAD, ignoring color.
+     */
+    private int selectFastestNonEmptySlot(double currentAngle) {
+        int bestSlot = -1;
+        double bestDiff = Double.MAX_VALUE;
+
+        for (int i = 0; i < SLOT_COUNT; i++) {
+            if (!slotHasBall(i)) continue;
+
+            double targetAngle =
+                    slotCenterAngleAtIntake(i) + (LOAD_ANGLE - INTAKE_ANGLE);
+            double diff = Math.abs(
+                    smallestAngleDiff(targetAngle, currentAngle)
+            );
+
+            if (diff < bestDiff) {
+                bestDiff = diff;
+                bestSlot = i;
+            }
+        }
+
+        return bestSlot;
+    }
+
+    /**
+     * Choose which slot to eject next.
+     *
+     * If we have a valid tag (21/22/23), we follow the color pattern:
+     *   step 0,1,2 → desired color from getPatternForTag(tag)
+     * For each desired color we choose the *nearest* slot of that color.
+     * If no slot of that color exists, fall back to "fastest non-empty" logic.
+     *
+     * If tag is 0 / invalid → always "fastest non-empty".
+     */
+    private int selectNextEjectSlotIndex() {
+        double currentAngle = getCurrentAngleDeg();
+
+        Ball[] pattern = getPatternForTag(gameTag);
+        boolean usePattern = (pattern != null && patternStep < pattern.length);
+
+        if (usePattern) {
+            Ball desired = pattern[patternStep];
+
+            // 1st pass: nearest slot of the desired color
+            int bestSlot = -1;
+            double bestDiff = Double.MAX_VALUE;
+
+            for (int i = 0; i < SLOT_COUNT; i++) {
+                if (slots[i] != desired) continue;
+
+                double targetAngle =
+                        slotCenterAngleAtIntake(i) + (LOAD_ANGLE - INTAKE_ANGLE);
+                double diff = Math.abs(
+                        smallestAngleDiff(targetAngle, currentAngle)
+                );
+
+                if (diff < bestDiff) {
+                    bestDiff = diff;
+                    bestSlot = i;
+                }
+            }
+
+            if (bestSlot != -1) {
+                return bestSlot;
+            }
+            // If we didn't find the desired color, we just fall through to fastest non-empty
+        }
+
+        // Either no pattern, pattern finished, or we don't have that color available
+        return selectFastestNonEmptySlot(currentAngle);
+    }
+
 
     // ===== MAIN UPDATE: auto-intake + ejection =====
     //
@@ -290,9 +424,10 @@ public class SpindexerSubsystem {
         // --- Handle eject button press (start sequence if we have balls) ---
         if (yEdge && !ejecting && hasAnyBall()) {
             ejecting = true;
-            ejectSlotIndex = 0;
             ejectPhase = 0;
+            patternStep = 0;  // start from the first color in the pattern
         }
+
 
         // --- Auto-intake (same as your old update) ---
         if (!isFull()) {
@@ -332,19 +467,26 @@ public class SpindexerSubsystem {
             long now = System.currentTimeMillis();
 
             if (ejectPhase == 0) {
-                // Find next non-empty slot
-                if (ejectSlotIndex >= SLOT_COUNT || !hasAnyBall()) {
-                    // Done ejecting: go back so slot 0 is at the intake position
+                // Decide which slot we want to shoot next
+                if (!hasAnyBall()) {
+                    // Nothing left to shoot
                     homeToIntake();
                     ejecting = false;
-                } else if (!slotHasBall(ejectSlotIndex)) {
-                    // Skip empty slot
-                    ejectSlotIndex++;
                 } else {
-                    // Rotate this slot to LOAD (blocking move with timeout)
-                    moveSlotToLoadBlocking(ejectSlotIndex);
-                    ejectPhaseTime = now + 100; // wait 0.1s before loader fires
-                    ejectPhase = 1;
+                    int nextSlot = selectNextEjectSlotIndex();
+
+                    if (nextSlot < 0 || nextSlot >= SLOT_COUNT) {
+                        // No valid slot found, bail out safely
+                        homeToIntake();
+                        ejecting = false;
+                    } else {
+                        ejectSlotIndex = nextSlot;
+
+                        // Rotate this slot to LOAD (blocking move with timeout)
+                        moveSlotToLoadBlocking(ejectSlotIndex);
+                        ejectPhaseTime = now + 100; // wait 0.1s before loader fires
+                        ejectPhase = 1;
+                    }
                 }
             } else if (ejectPhase == 1) {
                 // After 0.1s at LOAD, fire the loader
@@ -354,14 +496,32 @@ public class SpindexerSubsystem {
                     ejectPhase = 2;
                 }
             } else if (ejectPhase == 2) {
-                // After extra 0.1s, mark slot empty and move to next
+                // After extra 0.1s, mark slot empty and either shoot next or finish
                 if (now >= ejectPhaseTime) {
                     clearSlot(ejectSlotIndex);
-                    ejectSlotIndex++;
-                    ejectPhase = 0;
+
+                    // If we were using a pattern, advance to the next color step
+                    Ball[] pattern = getPatternForTag(gameTag);
+                    if (pattern != null) {
+                        patternStep++;
+                    }
+
+                    boolean usingPattern = (pattern != null);
+
+                    // Stop if:
+                    //  - no balls are left, OR
+                    //  - we were following a pattern and we've done all 3 shots
+                    if (!hasAnyBall() ||
+                            (usingPattern && patternStep >= pattern.length)) {
+                        homeToIntake();
+                        ejecting = false;
+                    } else {
+                        ejectPhase = 0; // continue to next shot
+                    }
                 }
             }
         }
+
 
 
         return isFull();
@@ -376,8 +536,20 @@ public class SpindexerSubsystem {
     }
 
     public String getGamePattern() {
-        return "2P + 1G";
+        Ball[] pattern = getPatternForTag(gameTag);
+        if (pattern == null) {
+            return "Fast (no pattern, tag=" + gameTag + ")";
+        }
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < pattern.length; i++) {
+            if (i > 0) sb.append("-");
+            if (pattern[i] == Ball.PURPLE) sb.append("P");
+            else if (pattern[i] == Ball.GREEN) sb.append("G");
+            else sb.append("?");
+        }
+        return sb.toString();
     }
+
 
     public void moveSlotToLoadBlocking(int slotIndex) {
         moveSlotToLoad(slotIndex, MOVE_POWER);
