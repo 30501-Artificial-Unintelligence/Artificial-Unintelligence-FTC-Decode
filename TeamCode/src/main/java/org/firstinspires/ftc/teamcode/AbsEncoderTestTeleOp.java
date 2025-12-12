@@ -9,7 +9,7 @@ public class AbsEncoderTestTeleOp extends LinearOpMode {
 
     @Override
     public void runOpMode() {
-        AnalogInput abs = hardwareMap.get(AnalogInput.class, "spindexerAbs");
+        AnalogInput abs = hardwareMap.get(AnalogInput.class, "turretABS3");
 
         telemetry.addLine("Rotate the encoder by hand and watch the voltage & deg.");
         telemetry.update();

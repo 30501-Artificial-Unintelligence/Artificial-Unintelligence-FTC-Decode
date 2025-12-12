@@ -335,6 +335,7 @@ public class FtcRobotControllerActivity extends Activity
             FtcRobotControllerActivity.this, popupMenu.getMenu());
         popupMenu.show();
       }
+
     });
 
     updateMonitorLayout(getResources().getConfiguration());
@@ -409,6 +410,7 @@ public class FtcRobotControllerActivity extends Activity
     checkPreferredChannel();
 
     AnnotatedHooksClassFilter.getInstance().callOnCreateMethods(this);
+
   }
 
   protected UpdateUI createUpdateUI() {

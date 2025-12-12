@@ -5,6 +5,8 @@ import com.qualcomm.robotcore.hardware.DcMotorEx;
 import com.qualcomm.robotcore.hardware.DcMotorSimple;
 import com.qualcomm.robotcore.hardware.HardwareMap;
 import com.qualcomm.robotcore.hardware.Servo;
+import com.qualcomm.robotcore.util.ElapsedTime;
+import com.qualcomm.robotcore.util.Range;
 
 public class ShooterSubsystem {
 
@@ -13,6 +15,7 @@ public class ShooterSubsystem {
     private static final double TICKS_PER_REV = 28.0;
     private static final double PHYSICAL_MAX_RPM = 6000.0;
     private static final double RPM_STEP = 250.0;
+    private static final double MAX_RPM = PHYSICAL_MAX_RPM;
 
     // ===== HOOD SERVO CONSTANTS =====
     // Tuned from your servo test:
@@ -50,12 +53,26 @@ public class ShooterSubsystem {
     private boolean prevRpmUp   = false;
     private boolean prevRpmDown = false;
 
+    // ===== PID STATE =====
+    private double kP = 0.0008;
+    private double kI = 0.0;
+    private double kD = 0.0002;
+
+    private double integral = 0.0;
+    private double lastError = 0.0;
+    private double lastTime = 0.0;
+    private boolean pidInitialized = false;
+
+    private final ElapsedTime pidTimer = new ElapsedTime();
+
+
     public ShooterSubsystem(HardwareMap hardwareMap) {
         motor = hardwareMap.get(DcMotorEx.class, "motor_one");
         hoodServo = hardwareMap.get(Servo.class, "hoodServo");
 
-        motor.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
-        motor.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
+        motor.setMode(DcMotor.RunMode.STOP_AND_RESET_ENCODER);
+        motor.setMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
+        motor.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.FLOAT);
         motor.setDirection(DcMotorSimple.Direction.FORWARD);
 
         // Start in NEAR field by default
@@ -126,12 +143,48 @@ public class ShooterSubsystem {
         // === APPLY SHOOTER COMMAND ===
         isOn = shooterOnCommand;
 
-        if (isOn) {
-            double targetRpm = (fieldPos == 1) ? farRpm : nearRpm;
-            motor.setVelocity(rpmToTicksPerSec(targetRpm));
+        double targetRpm = (fieldPos == 1) ? farRpm : nearRpm;
+        if (isOn && targetRpm > 0) {
+            runPidStep(targetRpm);
         } else {
-            motor.setPower(0.0);
+            stop(); // ensures power = 0 and PID reset
         }
+    }
+
+    // ==== PID UPDATE ====
+    private void runPidStep(double targetRpm) {
+        double now = pidTimer.seconds();
+
+        if (!pidInitialized) {
+            lastTime = now;
+            lastError = 0.0;
+            integral = 0.0;
+            pidInitialized = true;
+        }
+        double dt = now - lastTime;
+        if (dt <= 0) {
+            return;
+        }
+
+        double currentRpm = getCurrentRpmEstimate();
+        double error = targetRpm - currentRpm;
+
+        integral += error * dt;
+        double derivative = (error - lastError) / dt;
+
+        double pid = kP * error + kI * integral + kD * derivative;
+        // Super simple feedforward: "how fast do we want, as a fraction of max"
+        double ff = targetRpm / MAX_RPM;
+
+        double power = ff + pid;
+
+        // Make sure power is legal
+        power = Range.clip(power, 0.0, 1.0);
+
+        motor.setPower(power);
+
+        lastError = error;
+        lastTime = now;
     }
 
     // ===== GETTERS FOR TELEMETRY / OTHER SUBSYSTEMS =====
