@@ -1,6 +1,5 @@
 package org.firstinspires.ftc.teamcode.subsystems;
 
-import com.qualcomm.robotcore.hardware.DcMotor;
 import com.qualcomm.robotcore.hardware.DcMotorEx;
 import com.qualcomm.robotcore.hardware.DcMotorSimple;
 import com.qualcomm.robotcore.hardware.HardwareMap;
@@ -18,17 +17,13 @@ public class ShooterSubsystem {
     private static final double MAX_RPM = PHYSICAL_MAX_RPM;
 
     // ===== HOOD SERVO CONSTANTS =====
-    // Tuned from your servo test:
+    // Tuned from your servo test (adjust in practice):
     //  0.85 -> ~35 degrees (near)
     //  0.92 -> ~60 degrees (far-ish)
-    private static final double HOOD_NEAR_POS = 0.85;  // adjust in practice
-    private static final double HOOD_FAR_POS  = 0.92;  // adjust in practice
+    private static final double HOOD_NEAR_POS = 0.85;
+    private static final double HOOD_FAR_POS  = 0.92;
 
     // ===== HELPERS =====
-    private static double rpmToTicksPerSec(double rpm) {
-        return rpm * TICKS_PER_REV / 60.0;
-    }
-
     private static double ticksPerSecToRpm(double tps) {
         return tps * 60.0 / TICKS_PER_REV;
     }
@@ -38,24 +33,20 @@ public class ShooterSubsystem {
     private final Servo hoodServo;
 
     // ===== STATE =====
+    private boolean isOn = false;   // shooter commanded on/off
+    private int fieldPos = 0;       // 0 = nearfield, 1 = far
 
-    // True if the subsystem is currently commanded to run
-    private boolean isOn = false;
-
-    // 0 = nearfield, 1 = far
-    private int fieldPos = 0;
-
-    // independent RPMs for near and far
-    private double nearRpm = 2700.0;  // tune these on-field
+    private double nearRpm = 2700.0;   // tune these on field
     private double farRpm  = 3300.0;
 
-    // edge-detection for RPM buttons (TeleOp sends raw button states)
+    // edge-detection for RPM buttons
     private boolean prevRpmUp   = false;
     private boolean prevRpmDown = false;
 
     // ===== PID STATE =====
+    // Start with these and tune
     private double kP = 0.0008;
-    private double kI = 0.0;
+    private double kI = 0.0004;
     private double kD = 0.0002;
 
     private double integral = 0.0;
@@ -65,28 +56,30 @@ public class ShooterSubsystem {
 
     private final ElapsedTime pidTimer = new ElapsedTime();
 
-
     public ShooterSubsystem(HardwareMap hardwareMap) {
         motor = hardwareMap.get(DcMotorEx.class, "motor_one");
         hoodServo = hardwareMap.get(Servo.class, "hoodServo");
 
-        motor.setMode(DcMotor.RunMode.STOP_AND_RESET_ENCODER);
-        motor.setMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
-        motor.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.FLOAT);
+        // We are doing our own velocity control, so avoid built-in velocity PID
+        motor.setMode(com.qualcomm.robotcore.hardware.DcMotor.RunMode.STOP_AND_RESET_ENCODER);
+        motor.setMode(com.qualcomm.robotcore.hardware.DcMotor.RunMode.RUN_WITHOUT_ENCODER);
+        motor.setZeroPowerBehavior(com.qualcomm.robotcore.hardware.DcMotor.ZeroPowerBehavior.BRAKE);
         motor.setDirection(DcMotorSimple.Direction.FORWARD);
 
-        // Start in NEAR field by default
+        // Start NEAR field by default
         fieldPos = 0;
         hoodServo.setPosition(HOOD_NEAR_POS);
+
+        pidTimer.reset();
     }
 
     /**
-     * Call this once per loop from your TeleOp.
+     * Call this once per loop from TeleOp.
      *
-     * @param shooterOnCommand  True = run shooter, False = stop (comes from your TeleOp logic).
-     * @param rpmUpButton       e.g. gamepad1.dpad_up (rising edge bumps RPM for current fieldPos).
-     * @param rpmDownButton     e.g. gamepad1.dpad_down (rising edge lowers RPM for current fieldPos).
-     * @param fieldPosInput     0 = near, 1 = far (comes from your TeleOp / auto logic).
+     * @param shooterOnCommand  True = run shooter, False = stop
+     * @param rpmUpButton       D-pad up (rising edge bumps RPM for current fieldPos)
+     * @param rpmDownButton     D-pad down (rising edge lowers RPM for current fieldPos)
+     * @param fieldPosInput     0 = near, 1 = far
      */
     public void update(boolean shooterOnCommand,
                        boolean rpmUpButton,
@@ -94,31 +87,23 @@ public class ShooterSubsystem {
                        int fieldPosInput) {
 
         // === FIELD POSITION / HOOD CONTROL ===
-        // Clamp to [0,1] just in case
         int newFieldPos = (fieldPosInput == 1) ? 1 : 0;
 
         if (newFieldPos != fieldPos) {
             fieldPos = newFieldPos;
-
-            // Move hood when mode changes
             if (fieldPos == 1) {
-                // far field
                 hoodServo.setPosition(HOOD_FAR_POS);
             } else {
-                // near field
                 hoodServo.setPosition(HOOD_NEAR_POS);
             }
         }
 
         // === RPM ADJUSTMENT (per mode) ===
-        // Rising-edge detection so holding the button doesn't spam
         if (rpmUpButton && !prevRpmUp) {
             if (fieldPos == 1) {
-                // far field
                 farRpm += RPM_STEP;
                 if (farRpm > PHYSICAL_MAX_RPM) farRpm = PHYSICAL_MAX_RPM;
             } else {
-                // near field
                 nearRpm += RPM_STEP;
                 if (nearRpm > PHYSICAL_MAX_RPM) nearRpm = PHYSICAL_MAX_RPM;
             }
@@ -126,28 +111,26 @@ public class ShooterSubsystem {
 
         if (rpmDownButton && !prevRpmDown) {
             if (fieldPos == 1) {
-                // far field
                 farRpm -= RPM_STEP;
                 if (farRpm < 0) farRpm = 0;
             } else {
-                // near field
                 nearRpm -= RPM_STEP;
                 if (nearRpm < 0) nearRpm = 0;
             }
         }
 
-        // Save button states for next loop
         prevRpmUp = rpmUpButton;
         prevRpmDown = rpmDownButton;
 
         // === APPLY SHOOTER COMMAND ===
         isOn = shooterOnCommand;
 
-        double targetRpm = (fieldPos == 1) ? farRpm : nearRpm;
+        double targetRpm = getTargetRpm();
+
         if (isOn && targetRpm > 0) {
             runPidStep(targetRpm);
         } else {
-            stop(); // ensures power = 0 and PID reset
+            stop();
         }
     }
 
@@ -161,10 +144,9 @@ public class ShooterSubsystem {
             integral = 0.0;
             pidInitialized = true;
         }
+
         double dt = now - lastTime;
-        if (dt <= 0) {
-            return;
-        }
+        if (dt <= 0) return;
 
         double currentRpm = getCurrentRpmEstimate();
         double error = targetRpm - currentRpm;
@@ -173,12 +155,11 @@ public class ShooterSubsystem {
         double derivative = (error - lastError) / dt;
 
         double pid = kP * error + kI * integral + kD * derivative;
-        // Super simple feedforward: "how fast do we want, as a fraction of max"
+
+        // Simple feedforward: target fraction of max rpm
         double ff = targetRpm / MAX_RPM;
 
         double power = ff + pid;
-
-        // Make sure power is legal
         power = Range.clip(power, 0.0, 1.0);
 
         motor.setPower(power);
@@ -187,13 +168,12 @@ public class ShooterSubsystem {
         lastTime = now;
     }
 
-    // ===== GETTERS FOR TELEMETRY / OTHER SUBSYSTEMS =====
+    // ===== GETTERS =====
 
     public boolean isOn() {
         return isOn;
     }
 
-    /** 0 = near, 1 = far */
     public int getFieldPos() {
         return fieldPos;
     }
@@ -206,14 +186,12 @@ public class ShooterSubsystem {
         return farRpm;
     }
 
-    /** Target RPM for current field position. */
     public double getTargetRpm() {
         return (fieldPos == 1) ? farRpm : nearRpm;
     }
 
-    /** Estimated current RPM from encoder velocity. */
     public double getCurrentRpmEstimate() {
-        double ticksPerSec = motor.getVelocity(); // encoder velocity in ticks/sec
+        double ticksPerSec = motor.getVelocity();
         return ticksPerSecToRpm(ticksPerSec);
     }
 
@@ -224,13 +202,32 @@ public class ShooterSubsystem {
     public void stop() {
         isOn = false;
         motor.setPower(0.0);
+
+        integral = 0.0;
+        lastError = 0.0;
+        pidInitialized = false;
     }
 
-    public  void setNearRPM (long RPM){
-        nearRpm = RPM;
+    // ===== PID GAIN ACCESSORS (for tuning in TeleOp) =====
+
+    public double getKp() { return kP; }
+    public double getKi() { return kI; }
+    public double getKd() { return kD; }
+
+    public void adjustKp(double delta) {
+        kP = Math.max(0.0, kP + delta);
     }
 
-    public void setFarRPM (long RPM){
-        farRpm = RPM;
+    public void adjustKi(double delta) {
+        kI = Math.max(0.0, kI + delta);
     }
+
+    public void adjustKd(double delta) {
+        kD = Math.max(0.0, kD + delta);
+    }
+
+    // Optional helpers for setting absolute values if you want
+    public void setKp(double value) { kP = Math.max(0.0, value); }
+    public void setKi(double value) { kI = Math.max(0.0, value); }
+    public void setKd(double value) { kD = Math.max(0.0, value); }
 }
