@@ -6,68 +6,66 @@ import com.qualcomm.robotcore.hardware.DcMotorEx;
 import com.qualcomm.robotcore.hardware.DcMotorSimple;
 import com.qualcomm.robotcore.hardware.HardwareMap;
 import com.qualcomm.robotcore.util.Range;
+
 public class TurretSubsystem {
-    // goBILDA 435 RPM motor
-    private static final double TICKS_PER_REV = 383.6;
-    private static final double PHYSICAL_MAX_RPM = 435.0;
-    private static final double RPM_STEP = 15.0;
-    private static final double MOTOR_REV_PER_TURRET_REV = 290.0/60.0;
-    private static final double TICKS_PER_TURRET_DEG = TICKS_PER_REV * MOTOR_REV_PER_TURRET_REV / 360.0;//for abs encoder too
+    // ===== MOTOR / GEAR CONSTANTS =====
+    // goBILDA 435 RPM motor integrated encoder
+    private static final double TICKS_PER_MOTOR_REV = 383.6;
 
+    // 290T turret gear, 60T motor pulley → motor spins 290/60 times per turret rev
+    private static final double MOTOR_REV_PER_TURRET_REV = 290.0 / 60.0;
+    private static final double TICKS_PER_TURRET_REV =
+            TICKS_PER_MOTOR_REV * MOTOR_REV_PER_TURRET_REV;
+    private static final double TICKS_PER_TURRET_DEG = TICKS_PER_TURRET_REV / 360.0;
 
-    //angle limits
-    private static final double MIN_ANGLE_DEG = -120.0;
-    private static final double MAX_ANGLE_DEG = 120.0;
+    // Angle limits (turret frame)
+    private static final double MIN_ANGLE_DEG = -200.0;
+    private static final double MAX_ANGLE_DEG =  200.0;
 
-    //proportional gain for position control
-    private static final double kP = 0.01;
+    // When auto-positioning
     private static final double MAX_AUTO_POWER = 0.5;
 
+    // How far tick-angle is allowed to drift from abs before we re-sync
+    private static final double RESYNC_THRESHOLD_DEG = 5.0;
+
+    // ===== HARDWARE =====
     private final DcMotorEx turretMotor;
-    private final AnalogInput turretAbs;  // analog absolute encoder
+    private final AnalogInput turretAbs;  // analog absolute encoder on turret
 
-    //ABS encoder calib
-    private static final double ZERO_ABS_DEG = 123.4;  // <-- replace with your measured value
-    // Flip sign if abs encoder runs backwards
-    private static final double ANGLE_DIRECTION = 1.0;
+    // Abs encoder calibration:
+    // raw abs angle (0..360) when turret is at "0°" (centered / your chosen zero)
+    private static final double ZERO_ABS_DEG = 123.4; // <-- you must calibrate this
+    // Flip this if abs angle increases opposite your "positive turret" direction
+    private static final double ANGLE_DIRECTION = 1.0; // or -1.0
 
-    // Offset so that ticks → real turret angle:
-    // turretAngleDeg = angleOffsetDeg + (ticks / TICKS_PER_TURRET_DEG)
+    // Relationship between motor ticks and turret angle:
+    // turretAngleDeg = angleOffsetDeg + ticks / TICKS_PER_TURRET_DEG
     private double angleOffsetDeg = 0.0;
+
+    // Control state
+    private boolean positionMode = false;   // false = manual, true = RUN_TO_POSITION
+    private double targetAngleDeg = 0.0;
 
     private double maxVoltage;
 
-    //control state
-    private boolean positionMode = false; //false = manual, true = auto angle
-    private double targetAngleDeg = 0.0; //desired turret angle
-    private double manualPower = 0.0; // joystick power when in manual
-
-    public TurretSubsystem (HardwareMap hardwareMap){
+    public TurretSubsystem(HardwareMap hardwareMap) {
         turretMotor = hardwareMap.get(DcMotorEx.class, "turretMotor");
-        turretAbs = hardwareMap.get(AnalogInput.class, "turretABS");
+        turretAbs   = hardwareMap.get(AnalogInput.class, "turretABS");
+
         turretMotor.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
         turretMotor.setDirection(DcMotorSimple.Direction.FORWARD);
 
         turretMotor.setMode(DcMotor.RunMode.STOP_AND_RESET_ENCODER);
-        turretMotor.setMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER); // use ELC encoder not the on motor one
+        // We'll switch modes as needed, but RUN_USING_ENCODER is a safe default
+        turretMotor.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
 
         maxVoltage = turretAbs.getMaxVoltage();
 
-        // Use the absolute encoder ONCE to line up motor ticks with real turret angle
+        // One-time alignment of motor ticks with the absolute encoder
         computeAngleOffsetFromAbs();
-
     }
 
-
-    // Internal helpers
-    private static double rpmToTicksPerSec(double rpm) {
-        return rpm * TICKS_PER_REV / 60.0;
-    }
-    private static double ticksPerSecToRpm(double tps) {
-        return tps * 60.0 / TICKS_PER_REV;
-    }
-
-    // --- ABS ENCODER HELPERS ---
+    // ===== ABS ENCODER HELPERS =====
 
     /** Raw abs angle 0..360 from the analog encoder. */
     private double getAbsAngle0to360() {
@@ -84,24 +82,46 @@ public class TurretSubsystem {
     }
 
     /**
-     * Compute angleOffsetDeg so that:
-     *   abs angle (from analog) == angleOffsetDeg + ticks / TICKS_PER_TURRET_DEG
-     * Call once at startup.
+     * Turret angle directly from the abs encoder (no motor ticks).
+     * Returns something like [-180, 180) in your turret frame.
      */
-    private void computeAngleOffsetFromAbs() {
-        double rawAbs = getAbsAngle0to360();                 // 0..360
-        double absRelative = rawAbs - ZERO_ABS_DEG;          // relative to your mechanical zero
-        absRelative = wrapDeg(absRelative) * ANGLE_DIRECTION;
-
-        int ticks = turretMotor.getCurrentPosition();
-
-        // Solve: absRelative = angleOffsetDeg + ticks / TICKS_PER_TURRET_DEG
-        angleOffsetDeg = absRelative - (ticks / TICKS_PER_TURRET_DEG);
+    private double getAbsTurretAngleDeg() {
+        double rawAbs = getAbsAngle0to360();      // 0..360
+        double rel = rawAbs - ZERO_ABS_DEG;       // 0 when turret at mechanical zero
+        rel = wrapDeg(rel) * ANGLE_DIRECTION;     // apply direction & wrap
+        return rel;
     }
 
-    // --- ANGLE APIs ---
+    /**
+     * Compute angleOffsetDeg so that:
+     *   absAngle == angleOffsetDeg + ticks / TICKS_PER_TURRET_DEG
+     * Call at startup and any time we decide the tick-angle has drifted.
+     */
+    private void computeAngleOffsetFromAbs() {
+        double absAngle = getAbsTurretAngleDeg();   // what turret really is
+        int ticks = turretMotor.getCurrentPosition();
+        double tickAngle = ticks / TICKS_PER_TURRET_DEG;
+        angleOffsetDeg = absAngle - tickAngle;
+    }
 
-    /** Current turret angle in degrees, using motor ticks + calibrated offset. */
+    /**
+     * If tick-based angle drifts too far from abs angle, re-align them.
+     * You can call this in update() every loop.
+     */
+    private void resyncFromAbsIfNeeded() {
+        double absAngle  = getAbsTurretAngleDeg();
+        double tickAngle = getCurrentAngleDeg();
+        double diff = wrapDeg(absAngle - tickAngle);
+
+        if (Math.abs(diff) > RESYNC_THRESHOLD_DEG) {
+            // Re-calc offset so ticks match abs again
+            computeAngleOffsetFromAbs();
+        }
+    }
+
+    // ===== ANGLE / TICKS HELPERS =====
+
+    /** Current turret angle (deg) from motor ticks + calibrated offset. */
     public double getCurrentAngleDeg() {
         int ticks = turretMotor.getCurrentPosition();
         return angleOffsetDeg + (ticks / TICKS_PER_TURRET_DEG);
@@ -111,42 +131,79 @@ public class TurretSubsystem {
         return targetAngleDeg;
     }
 
-    // --- CONTROL MODES ---
+    /**
+     * Convert desired turret angle to the CLOSEST tick target,
+     * so the motor takes the shortest path (handles wrap).
+     */
+    private int shortestTicksForAngle(double angleDeg) {
+        double clippedAngle = Range.clip(angleDeg, MIN_ANGLE_DEG, MAX_ANGLE_DEG);
 
-    /** Manual mode: power from joystick. */
+        // Base tick position for this angle
+        double desiredTicksDouble = (clippedAngle - angleOffsetDeg) * TICKS_PER_TURRET_DEG;
+        int baseTicks = (int) Math.round(desiredTicksDouble);
+
+        int currentTicks = turretMotor.getCurrentPosition();
+        int ticksPerRev = (int) Math.round(TICKS_PER_TURRET_REV);
+
+        int diff = baseTicks - currentTicks;
+        int k = (int) Math.round((double) diff / ticksPerRev);
+
+        // Shift by whole turret revs so we get the nearest equivalent position
+        int bestTicks = baseTicks - k * ticksPerRev;
+        return bestTicks;
+    }
+
+    // ===== CONTROL MODES =====
+
+    /** Manual mode: power from joystick (no angle limit unless you add it here). */
     public void setManualPower(double power) {
         positionMode = false;
+
+        double current = getCurrentAngleDeg();
+        double marginDeg = 5.0;  // buffer before you actually hit the hard limit
+
+        // If pushing positive (CCW?) and we're already near +limit, kill power
+        if (power > 0 && current >= MAX_ANGLE_DEG - marginDeg) {
+            power = 0.0;
+        }
+        // If pushing negative (CW?) and near -limit, kill power
+        else if (power < 0 && current <= MIN_ANGLE_DEG + marginDeg) {
+            power = 0.0;
+        }
+
         power = Range.clip(power, -1.0, 1.0);
 
-        // Make sure we're not stuck in RUN_TO_POSITION
-        if (turretMotor.getMode() != DcMotor.RunMode.RUN_USING_ENCODER) {
+        // Make sure we aren’t stuck in RUN_TO_POSITION
+        if (turretMotor.getMode() != DcMotor.RunMode.RUN_USING_ENCODER
+                && turretMotor.getMode() != DcMotor.RunMode.RUN_WITHOUT_ENCODER) {
             turretMotor.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
         }
+
         turretMotor.setPower(power);
     }
 
+
     /** Position mode: go to a specific turret angle using RUN_TO_POSITION. */
     public void goToAngle(double angleDeg) {
-        angleDeg = Range.clip(angleDeg, MIN_ANGLE_DEG, MAX_ANGLE_DEG);
-        targetAngleDeg = angleDeg;
+        targetAngleDeg = Range.clip(angleDeg, MIN_ANGLE_DEG, MAX_ANGLE_DEG);
         positionMode = true;
 
-        // Convert desired angle to motor ticks:
-        // angleDeg = angleOffsetDeg + ticks / TICKS_PER_TURRET_DEG
-        // → ticks = (angleDeg - angleOffsetDeg) * TICKS_PER_TURRET_DEG
-        int targetTicks = (int) Math.round((angleDeg - angleOffsetDeg) * TICKS_PER_TURRET_DEG);
+        int targetTicks = shortestTicksForAngle(targetAngleDeg);
 
         turretMotor.setTargetPosition(targetTicks);
         turretMotor.setMode(DcMotor.RunMode.RUN_TO_POSITION);
-
-        // Set a reasonable power cap; PID is handled by the built-in controller
-        turretMotor.setPower(0.4);
+        turretMotor.setPower(MAX_AUTO_POWER);
     }
 
-    /** Call this every loop just for telemetry / mode management. */
+    /**
+     * Call this every loop from TeleOp / Auto.
+     * Right now it just keeps the encoder aligned to the abs angle.
+     */
     public void update() {
-        // You *can* add logic here if you want to auto-switch back to manual
-        // after reaching target, but it's not strictly required.
-    }
+        // Periodically re-sync ticks to abs if we've drifted
+        resyncFromAbsIfNeeded();
 
+        // You could also add logic here to detect when RUN_TO_POSITION
+        // has finished and automatically switch back to manual mode.
+    }
 }
