@@ -13,7 +13,7 @@ import org.firstinspires.ftc.teamcode.subsystems.SpindexerSubsystem;
 import org.firstinspires.ftc.teamcode.subsystems.TurretSubsystem;
 import org.firstinspires.ftc.teamcode.subsystems.IntakeSubsystem_Motor;
 
-@TeleOp(name = "Shooter Test pidF", group = "Test")
+@TeleOp(name = "Shooter Test pidF!!!", group = "Test")
 public class ShooterTestTeleOpPidf extends LinearOpMode {
 
     private ShooterSubsystemPIDF shooter;
@@ -66,7 +66,19 @@ public class ShooterTestTeleOpPidf extends LinearOpMode {
     private static final double KP_STEP = 0.0001;
     private static final double KI_STEP = 0.000001;
     private static final double KD_STEP = 0.00005;
-    private static final double KF_STEP = 0.000001; // adjust if too coarse/fine
+    // === PID base steps (smallest increments) ===
+    private static final double KP_BASE_STEP = 0.0001;
+    private static final double KI_BASE_STEP = 0.000001;
+    private static final double KD_BASE_STEP = 0.00005;
+    private static final double KF_BASE_STEP = 0.00001;
+
+    // Step multipliers: 0.1x, 1x, 10x, 100x etc.
+    private static final double[] STEP_MULTIPLIERS = {0.1, 1.0, 10.0, 100.0,1000.0,10000.0};
+    private int stepModeIndex = 1; // start at 1.0x
+
+    // edge tracking for step-mode toggle
+    private boolean prevStepModeButton = false;
+
 
     @Override
     public void runOpMode() {
@@ -94,6 +106,21 @@ public class ShooterTestTeleOpPidf extends LinearOpMode {
         spindexer.homeToIntake();
 
         while (opModeIsActive()) {
+            // ===== PID STEP MODE TOGGLE (driver1 left bumper) =====
+            boolean stepModeButton = gamepad1.left_bumper;
+
+            if (stepModeButton && !prevStepModeButton) {
+                stepModeIndex = (stepModeIndex + 1) % STEP_MULTIPLIERS.length;
+            }
+            prevStepModeButton = stepModeButton;
+
+// Compute the actual step for this frame
+            double stepScale = STEP_MULTIPLIERS[stepModeIndex];
+            double kpStep = KP_BASE_STEP * stepScale;
+            double kiStep = KI_BASE_STEP * stepScale;
+            double kdStep = KD_BASE_STEP * stepScale;
+            double kfStep = KF_BASE_STEP * stepScale;
+
             // ===== SHOOTER FIELD POSITION TOGGLE =====
             boolean leftStickButton = gamepad1.left_stick_button;
 
@@ -219,7 +246,7 @@ public class ShooterTestTeleOpPidf extends LinearOpMode {
                 wantIntake  = true;
             }
 
-            shooterOn = wantShooter;
+            shooterOn = true;
             intakeOn  = wantIntake;
 
             // ===== MANUAL FORCE-REGISTER FOR SPINDEXER (driver 2 bumpers) =====
@@ -250,24 +277,27 @@ public class ShooterTestTeleOpPidf extends LinearOpMode {
             // Circle (B) increases, Square (X) decreases selected param (edge-triggered)
             if (bPid && !prevBpid) {
                 switch (pidParamIndex) {
-                    case 0: shooter.adjustKp(KP_STEP);  break;
-                    case 1: shooter.adjustKi(KI_STEP);  break;
-                    case 2: shooter.adjustKd(KD_STEP);  break;
-                    case 3: shooter.adjustKf(KF_STEP);  break;
+                    case 0: shooter.adjustKp(kpStep);  break;
+                    case 1: shooter.adjustKi(kiStep);  break;
+                    case 2: shooter.adjustKd(kdStep);  break;
+                    case 3: shooter.adjustKf(kfStep);  break;
                 }
             }
 
             if (xPid && !prevXpid) {
                 switch (pidParamIndex) {
-                    case 0: shooter.adjustKp(-KP_STEP);  break;
-                    case 1: shooter.adjustKi(-KI_STEP);  break;
-                    case 2: shooter.adjustKd(-KD_STEP);  break;
-                    case 3: shooter.adjustKf(-KF_STEP);  break;
+                    case 0: shooter.adjustKp(-kpStep);  break;
+                    case 1: shooter.adjustKi(-kiStep);  break;
+                    case 2: shooter.adjustKd(-kdStep);  break;
+                    case 3: shooter.adjustKf(-kfStep);  break;
                 }
             }
 
             prevBpid = bPid;
             prevXpid = xPid;
+
+
+
 
             // ===== TELEMETRY =====
             SpindexerSubsystem.Ball[] s = spindexer.getSlots();
@@ -300,10 +330,13 @@ public class ShooterTestTeleOpPidf extends LinearOpMode {
                                     (pidParamIndex == 2) ? "kD" : "kF";
 
             telemetry.addData("PIDF Selected", selectedParamName);
+            telemetry.addData("Step Scale", STEP_MULTIPLIERS[stepModeIndex]);
             telemetry.addData("kP", shooter.getKp());
             telemetry.addData("kI", shooter.getKi());
             telemetry.addData("kD", shooter.getKd());
             telemetry.addData("kF", shooter.getKf());
+            telemetry.addData("kF", "%.6f", shooter.getKf());
+
 
 
             telemetry.addData("Pattern Tag", driverPatternTag);

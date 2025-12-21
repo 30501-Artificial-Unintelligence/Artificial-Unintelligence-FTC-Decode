@@ -55,7 +55,7 @@ public class ShooterSubsystemPIDF {
     private double kI = 0.0004;
     private double kD = 0.0002;
     // Feedforward: power ≈ kF * targetTicksPerSec, so kF ≈ 1 / maxTicksPerSec
-    private double kF = 1.0 / MAX_TICKS_PER_SEC;
+    private double kF = 14.0;
 
     public ShooterSubsystemPIDF(HardwareMap hardwareMap) {
         motor = hardwareMap.get(DcMotorEx.class, "motor_one");

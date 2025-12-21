@@ -46,7 +46,7 @@ public class SpindexerSubsystem {
 
     // Raw abs angle (deg) when SLOT 0 is perfectly at intake
     // i.e. absRaw == 260.7°  <=>  internal angle == 0°
-    private static final double ABS_MECH_OFFSET_DEG = 260.8;
+    private static final double ABS_MECH_OFFSET_DEG = 245.0;
 
     // ==== HARDWARE ====
 
@@ -102,11 +102,11 @@ public class SpindexerSubsystem {
     // If mag was NOT full when started shooting (give shooter more spin-up time)
     private static final long WAIT_BEFORE_LOADER_PARTIAL_MS = 2000;
 
-    private static final long WAIT_AFTER_LOADER_MS  = 700;
+    private static final long WAIT_AFTER_LOADER_MS  = 400;
     // Whether the mag was full (3 balls) when this eject sequence started
     private boolean startedWithFullMag = false;
 
-    private static final double ABS_REZERO_THRESHOLD_DEG = 5.0;
+    private static final double ABS_REZERO_THRESHOLD_DEG = 3.0;
 
 
 
