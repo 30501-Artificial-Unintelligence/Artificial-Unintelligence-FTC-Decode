@@ -51,11 +51,11 @@ public class ShooterSubsystemPIDF {
 
     // ===== PIDF GAINS (for built-in motor controller) =====
     // These are your logical gains; we push them into the motor via setPIDFCoefficients
-    private double kP = 0.0008;
+    private double kP = 38.0;
     private double kI = 0.0004;
     private double kD = 0.0002;
     // Feedforward: power ≈ kF * targetTicksPerSec, so kF ≈ 1 / maxTicksPerSec
-    private double kF = 14.0;
+    private double kF = 13.7;
 
     public ShooterSubsystemPIDF(HardwareMap hardwareMap) {
         motor = hardwareMap.get(DcMotorEx.class, "motor_one");
