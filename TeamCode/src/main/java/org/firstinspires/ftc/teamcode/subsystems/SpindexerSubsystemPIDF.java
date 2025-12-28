@@ -1,11 +1,6 @@
 package org.firstinspires.ftc.teamcode.subsystems;
 
-// If you use the older configurable annotation (what you used earlier):
 import com.bylazar.configurables.annotations.Configurable;
-
-// If you use FTControl Panels' annotation instead, use this and remove the line above:
-
-
 import com.qualcomm.hardware.rev.RevColorSensorV3;
 import com.qualcomm.robotcore.hardware.AnalogInput;
 import com.qualcomm.robotcore.hardware.DcMotor;
@@ -27,7 +22,7 @@ public class SpindexerSubsystemPIDF {
         public static double MOVE_POWER = 0.50;
         public static int    MOVE_TIMEOUT_MS = 700;
 
-        // Auto-rotate after detecting a ball (increase to keep it at intake longer)
+        // Auto-rotate after detecting a ball
         public static long AUTO_ROTATE_DELAY_MS = 180;
 
         // Shooter/eject timing
@@ -44,12 +39,8 @@ public class SpindexerSubsystemPIDF {
 
         // if |enc - abs| exceeds this for N consecutive checks, rezero from ABS
         public static double ABS_REZERO_THRESHOLD_DEG = 3.0;
-
-        // require this many consecutive "bad" checks before rezero
-        public static int ABS_REZERO_STREAK = 3;
-
-        // don't rezero more frequently than this
-        public static long ABS_REZERO_COOLDOWN_MS = 600;
+        public static int    ABS_REZERO_STREAK = 3;
+        public static long   ABS_REZERO_COOLDOWN_MS = 600;
 
         // ignore ABS readings that "jump" too much from last reading
         public static double ABS_MAX_JUMP_DEG = 25.0;
@@ -61,7 +52,7 @@ public class SpindexerSubsystemPIDF {
         // use N-sample circular mean for ABS angle to reduce noise
         public static int ABS_AVG_SAMPLES = 5;
 
-        // Optional: after a blocking move, if ABS says we're off target, do a low-power nudge
+        // Optional: after a move, if ABS says we're off target, do a low-power nudge
         public static boolean ABS_POSTMOVE_NUDGE = true;
         public static double  ABS_POSTMOVE_TOL_DEG = 2.0;
         public static double  ABS_POSTMOVE_POWER = 0.25;
@@ -82,7 +73,6 @@ public class SpindexerSubsystemPIDF {
     private static final double INTAKE_ANGLE = 0.0;
     private static final double LOAD_ANGLE   = 180.0;
     private static final int    SLOT_COUNT   = 3;
-    private static final int    TOLERANCE_TICKS = 10;
 
     private static final double ABS_VREF = 3.3;
 
@@ -114,7 +104,7 @@ public class SpindexerSubsystemPIDF {
     private boolean ejecting = false;
     private int ejectSlotIndex = 0;
     private long ejectPhaseTime = 0;
-    private int ejectPhase = 0; // 0=rotate,1=wait before loader,2=wait after loader
+    private int ejectPhase = 0; // 0=choose+start rotate,10=wait rotate,1=wait before loader,2=wait after loader
     private boolean startedWithFullMag = false;
 
     // Pattern state
@@ -129,6 +119,141 @@ public class SpindexerSubsystemPIDF {
 
     // PIDF caching
     private double lastP = Double.NaN, lastI = Double.NaN, lastD = Double.NaN, lastF = Double.NaN;
+
+    // =========================
+    // Non-blocking motion engine
+    // =========================
+    private enum MotionState { IDLE, RUNNING, NUDGE }
+    private MotionState motionState = MotionState.IDLE;
+
+    private long motionStartMs = 0;
+    private int  motionTimeoutMs = 0;
+    private double motionTargetAngleDeg = 0.0;
+    private double motionPower = 0.0;
+    private boolean motionAllowPostNudge = false;
+
+    // update intakeIndex when move completes (optional)
+    private Integer pendingIntakeIndexAfterMove = null;
+
+    // one-move queue (latest request wins)
+    private boolean queuedMove = false;
+    private double queuedAngleDeg = 0.0;
+    private double queuedPower = 0.0;
+    private int queuedTimeoutMs = 0;
+    private boolean queuedAllowPostNudge = false;
+    private Integer queuedIntakeIndexAfterMove = null;
+
+    private boolean isMoveBusy() {
+        return motionState != MotionState.IDLE || motor.isBusy();
+    }
+
+    private void queueMove(double angleDeg, double power, int timeoutMs,
+                           boolean allowPostNudge, Integer intakeIndexAfterMove) {
+        queuedMove = true;
+        queuedAngleDeg = angleDeg;
+        queuedPower = power;
+        queuedTimeoutMs = timeoutMs;
+        queuedAllowPostNudge = allowPostNudge;
+        queuedIntakeIndexAfterMove = intakeIndexAfterMove;
+    }
+
+    private void startMoveNow(double angleDeg, double power, int timeoutMs,
+                              boolean allowPostNudge, Integer intakeIndexAfterMove) {
+        applyRunToPositionPidfIfChanged();
+
+        motionTargetAngleDeg = normalizeAngle(angleDeg);
+        motionPower = power;
+        motionTimeoutMs = Math.max(50, timeoutMs);
+        motionStartMs = System.currentTimeMillis();
+        motionAllowPostNudge = allowPostNudge;
+        pendingIntakeIndexAfterMove = intakeIndexAfterMove;
+
+        int target = internalAngleDegToTicksNearest(motionTargetAngleDeg);
+        motor.setTargetPosition(target);
+        motor.setMode(DcMotor.RunMode.RUN_TO_POSITION);
+        motor.setPower(motionPower);
+
+        motionState = MotionState.RUNNING;
+    }
+
+    /** Request a move; returns immediately. If busy, it queues the latest request. */
+    private void requestMoveToAngle(double angleDeg, double power, int timeoutMs,
+                                    boolean allowPostNudge, Integer intakeIndexAfterMove) {
+        if (motionState != MotionState.IDLE) {
+            queueMove(angleDeg, power, timeoutMs, allowPostNudge, intakeIndexAfterMove);
+            return;
+        }
+        startMoveNow(angleDeg, power, timeoutMs, allowPostNudge, intakeIndexAfterMove);
+    }
+
+    /** Call every loop to advance motion + optional ABS nudge. */
+    private void updateMotion() {
+        if (motionState == MotionState.IDLE) {
+            // start queued move if any
+            if (queuedMove) {
+                queuedMove = false;
+                startMoveNow(queuedAngleDeg, queuedPower, queuedTimeoutMs, queuedAllowPostNudge, queuedIntakeIndexAfterMove);
+            }
+            return;
+        }
+
+        long now = System.currentTimeMillis();
+        boolean timeout = (now - motionStartMs) >= motionTimeoutMs;
+        boolean done = !motor.isBusy();
+
+        if (!(done || timeout)) return;
+
+        // Stop motor after RUN_TO_POSITION
+        motor.setPower(0);
+        motor.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
+
+        // Apply intakeIndex update on completion (if requested)
+        if (pendingIntakeIndexAfterMove != null) {
+            intakeIndex = pendingIntakeIndexAfterMove;
+            pendingIntakeIndexAfterMove = null;
+        }
+
+        // ABS sanity check when a move finishes
+        if (Tune.ABS_ENABLE_SANITY) {
+            maybeResyncFromAbs();
+        }
+
+        // Optional post-move nudge (only once)
+        if (motionState == MotionState.RUNNING
+                && motionAllowPostNudge
+                && Tune.ABS_ENABLE_SANITY
+                && Tune.ABS_POSTMOVE_NUDGE) {
+
+            Double absInternal = readAbsInternalDegAveraged();
+            if (absInternal != null) {
+                double targetNorm = normalizeAngle(motionTargetAngleDeg);
+                double absErrToTarget = smallestAngleDiff(absInternal, targetNorm);
+
+                if (Math.abs(absErrToTarget) > Tune.ABS_POSTMOVE_TOL_DEG) {
+                    // Snap zero from ABS then do one low-power nudge
+                    autoZeroFromAbsInternal(absInternal);
+
+                    int target2 = internalAngleDegToTicksNearest(targetNorm);
+                    motor.setTargetPosition(target2);
+                    motor.setMode(DcMotor.RunMode.RUN_TO_POSITION);
+                    motor.setPower(Tune.ABS_POSTMOVE_POWER);
+
+                    motionStartMs = now;
+                    motionTimeoutMs = Tune.ABS_POSTMOVE_TIMEOUT_MS;
+                    motionState = MotionState.NUDGE;
+                    return;
+                }
+            }
+        }
+
+        motionState = MotionState.IDLE;
+
+        // start queued move if any
+        if (queuedMove) {
+            queuedMove = false;
+            startMoveNow(queuedAngleDeg, queuedPower, queuedTimeoutMs, queuedAllowPostNudge, queuedIntakeIndexAfterMove);
+        }
+    }
 
     // =========================
     // Constructor
@@ -155,6 +280,7 @@ public class SpindexerSubsystemPIDF {
             hasLastAbs = true;
         }
 
+        // Non-blocking home request (will complete during first update loops)
         homeToIntake();
     }
 
@@ -171,7 +297,7 @@ public class SpindexerSubsystemPIDF {
     public void clearSlot(int idx) { slots[idx] = Ball.EMPTY; }
     public int getIntakeSlotIndex() { return intakeIndex; }
     public boolean isEjecting() { return ejecting; }
-    public boolean isAutoRotating() { return pendingAutoRotate; }
+    public boolean isAutoRotating() { return pendingAutoRotate || isMoveBusy(); }
 
     public int getEncoderTicks() { return motor.getCurrentPosition(); }
     public int getTargetTicks() { return motor.getTargetPosition(); }
@@ -195,11 +321,25 @@ public class SpindexerSubsystemPIDF {
     }
 
     public void homeToIntake() {
-        moveSlotToIntake(0, Tune.MOVE_POWER);
+        requestMoveToAngle(slotCenterAngleAtIntake(0), Tune.MOVE_POWER, Tune.MOVE_TIMEOUT_MS, true, 0);
+    }
+
+    // Keep these signatures so other code still compiles.
+    // They are now NON-BLOCKING.
+    public void moveToAngleBlocking(double angleDeg) {
+        requestMoveToAngle(angleDeg, Tune.MOVE_POWER, Tune.MOVE_TIMEOUT_MS, true, null);
+    }
+
+    public void moveToAngleBlocking(double angleDeg, double power) {
+        requestMoveToAngle(angleDeg, power, Tune.MOVE_TIMEOUT_MS, true, null);
+    }
+
+    public void moveToAngleAsync(double angleDeg, double power) {
+        requestMoveToAngle(angleDeg, power, Tune.MOVE_TIMEOUT_MS, true, null);
     }
 
     // =========================
-    // Main update
+    // Main update (NON-BLOCKING)
     // =========================
     public boolean update(Telemetry telemetry,
                           LoaderSubsystem loader,
@@ -207,6 +347,7 @@ public class SpindexerSubsystemPIDF {
                           int patternTagOverride) {
 
         applyRunToPositionPidfIfChanged();
+        updateMotion();
 
         // --- Optional manual override for tag ---
         if (patternTagOverride == 21 ||
@@ -238,14 +379,13 @@ public class SpindexerSubsystemPIDF {
             }
         }
 
-        // --- Auto-intake detect ---
-        if (!isFull()) {
+        // --- Auto-intake detect (only when we're idle) ---
+        if (!isFull() && !ejecting && !pendingAutoRotate && !isMoveBusy()) {
             boolean ballPresent = isBallPresent();
             if (ballPresent && !lastBallPresent && slots[intakeIndex] == Ball.EMPTY) {
                 Ball color = detectBallColor();
                 if (color == Ball.GREEN || color == Ball.PURPLE) {
                     slots[intakeIndex] = color;
-
                     pendingAutoRotate = true;
                     autoRotateTimeMs = System.currentTimeMillis() + Tune.AUTO_ROTATE_DELAY_MS;
                 }
@@ -253,17 +393,22 @@ public class SpindexerSubsystemPIDF {
             lastBallPresent = ballPresent;
         }
 
-        // --- Pending auto-rotate ---
+        // --- Pending auto-rotate (NON-BLOCKING) ---
         if (pendingAutoRotate && System.currentTimeMillis() >= autoRotateTimeMs) {
-            if (!motor.isBusy() && !ejecting) {
+            if (!ejecting && !isMoveBusy()) {
                 pendingAutoRotate = false;
                 int nextIndex = (int) ((intakeIndex + 1) % SLOT_COUNT);
-                startRunToAngleAsync(slotCenterAngleAtIntake(nextIndex), Tune.MOVE_POWER);
-                intakeIndex = nextIndex;
+                requestMoveToAngle(
+                        slotCenterAngleAtIntake(nextIndex),
+                        Tune.MOVE_POWER,
+                        Tune.MOVE_TIMEOUT_MS,
+                        true,
+                        nextIndex
+                );
             }
         }
 
-        // --- Eject state machine ---
+        // --- Eject state machine (NON-BLOCKING) ---
         if (ejecting) {
             long now = System.currentTimeMillis();
             switch (ejectPhase) {
@@ -285,15 +430,25 @@ public class SpindexerSubsystemPIDF {
 
                     ejectSlotIndex = nextSlot;
 
-                    // rotate to LOAD (blocking)
-                    moveSlotToLoadBlocking(ejectSlotIndex);
+                    // Request rotate-to-LOAD (async)
+                    if (!isMoveBusy()) {
+                        double loadAngle = slotCenterAngleAtIntake(ejectSlotIndex) + (LOAD_ANGLE - INTAKE_ANGLE);
+                        requestMoveToAngle(loadAngle, Tune.MOVE_POWER, Tune.MOVE_TIMEOUT_MS, true, null);
+                        ejectPhase = 10; // wait rotate complete
+                    }
+                    break;
+                }
 
-                    long delayMs = startedWithFullMag
-                            ? Tune.WAIT_BEFORE_LOADER_FULL_MS
-                            : Tune.WAIT_BEFORE_LOADER_PARTIAL_MS;
+                case 10: {
+                    // Wait until rotate-to-LOAD completes
+                    if (!isMoveBusy()) {
+                        long delayMs = startedWithFullMag
+                                ? Tune.WAIT_BEFORE_LOADER_FULL_MS
+                                : Tune.WAIT_BEFORE_LOADER_PARTIAL_MS;
 
-                    ejectPhaseTime = now + delayMs;
-                    ejectPhase = 1;
+                        ejectPhaseTime = now + delayMs;
+                        ejectPhase = 1;
+                    }
                     break;
                 }
 
@@ -325,9 +480,9 @@ public class SpindexerSubsystemPIDF {
             }
         }
 
-        // --- ABS sanity check when idle ---
+        // --- ABS sanity check when truly idle ---
         if (Tune.ABS_ENABLE_SANITY) {
-            boolean safeToCheck = !motor.isBusy() && !ejecting && !pendingAutoRotate;
+            boolean safeToCheck = !isMoveBusy() && !ejecting && !pendingAutoRotate;
             if (safeToCheck) {
                 maybeResyncFromAbs();
             } else {
@@ -344,6 +499,8 @@ public class SpindexerSubsystemPIDF {
             telemetry.addData("Spd enc-abs", diff == null ? "null" : String.format("%.1f", diff));
             telemetry.addData("Spd idx", intakeIndex);
             telemetry.addData("Spd zeroTicks", zeroTicks);
+            telemetry.addData("Spd moving", isMoveBusy());
+            telemetry.addData("Spd phase", ejecting ? ejectPhase : -1);
         }
 
         return isFull();
@@ -384,85 +541,8 @@ public class SpindexerSubsystemPIDF {
         return baseTicks - k * revTicks;
     }
 
-    private void startRunToAngleAsync(double angleDeg, double power) {
-        int target = internalAngleDegToTicksNearest(angleDeg);
-        motor.setTargetPosition(target);
-        motor.setMode(DcMotor.RunMode.RUN_TO_POSITION);
-        motor.setPower(power);
-    }
-
-    private void runToAngleBlocking(double angleDeg, double power, boolean allowPostNudge) {
-        applyRunToPositionPidfIfChanged();
-
-        int target = internalAngleDegToTicksNearest(angleDeg);
-        motor.setTargetPosition(target);
-        motor.setMode(DcMotor.RunMode.RUN_TO_POSITION);
-        motor.setPower(power);
-
-        long start = System.currentTimeMillis();
-        while (motor.isBusy() && (System.currentTimeMillis() - start) < Tune.MOVE_TIMEOUT_MS) {
-            try { Thread.sleep(5); } catch (InterruptedException ignored) { break; }
-        }
-
-        motor.setPower(0);
-        motor.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
-
-        if (Tune.ABS_ENABLE_SANITY) {
-            // After move, optionally snap zero if we're drifting
-            maybeResyncFromAbs();
-
-            // Optional: nudge to target based on ABS if still off target
-            if (allowPostNudge && Tune.ABS_POSTMOVE_NUDGE) {
-                Double absInternal = readAbsInternalDegAveraged();
-                if (absInternal != null) {
-                    double targetNorm = normalizeAngle(angleDeg);
-                    double absErrToTarget = smallestAngleDiff(absInternal, targetNorm);
-
-                    if (Math.abs(absErrToTarget) > Tune.ABS_POSTMOVE_TOL_DEG) {
-                        // Recompute zeroTicks from ABS and do one low-power short nudge
-                        autoZeroFromAbsInternal(absInternal);
-
-                        int target2 = internalAngleDegToTicksNearest(angleDeg);
-                        motor.setTargetPosition(target2);
-                        motor.setMode(DcMotor.RunMode.RUN_TO_POSITION);
-                        motor.setPower(Tune.ABS_POSTMOVE_POWER);
-
-                        long start2 = System.currentTimeMillis();
-                        while (motor.isBusy() && (System.currentTimeMillis() - start2) < Tune.ABS_POSTMOVE_TIMEOUT_MS) {
-                            try { Thread.sleep(5); } catch (InterruptedException ignored) { break; }
-                        }
-                        motor.setPower(0);
-                        motor.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
-                    }
-                }
-            }
-        }
-    }
-
-    public void moveToAngleBlocking(double angleDeg) {
-        runToAngleBlocking(angleDeg, Tune.MOVE_POWER, true);
-    }
-
-    public void moveToAngleBlocking(double angleDeg, double power) {
-        runToAngleBlocking(angleDeg, power, true);
-    }
-
-    public void moveToAngleAsync(double angleDeg, double power) {
-        startRunToAngleAsync(angleDeg, power);
-    }
-
     private double slotCenterAngleAtIntake(int slotIndex) {
         return INTAKE_ANGLE + slotIndex * DEGREES_PER_SLOT;
-    }
-
-    private void moveSlotToIntake(int slotIndex, double power) {
-        runToAngleBlocking(slotCenterAngleAtIntake(slotIndex), power, true);
-        intakeIndex = slotIndex;
-    }
-
-    private void moveSlotToLoadBlocking(int slotIndex) {
-        double angle = slotCenterAngleAtIntake(slotIndex) + (LOAD_ANGLE - INTAKE_ANGLE);
-        runToAngleBlocking(angle, Tune.MOVE_POWER, true);
     }
 
     // =========================
@@ -470,14 +550,6 @@ public class SpindexerSubsystemPIDF {
     // =========================
     private boolean absVoltageHealthy(double v) {
         return v >= Tune.ABS_MIN_VOLT && v <= Tune.ABS_MAX_VOLT;
-    }
-
-    private double getAbsRawDeg() {
-        double v = absEncoder.getVoltage();
-        double angle = (v / ABS_VREF) * 360.0;
-        angle %= 360.0;
-        if (angle < 0) angle += 360.0;
-        return angle;
     }
 
     /** single-sample internal angle deg in [0,360), or null if voltage unhealthy */
@@ -563,6 +635,17 @@ public class SpindexerSubsystemPIDF {
             lastAbsRezeroMs = now;
             absBadStreak = 0;
         }
+    }
+
+    public void rezeroFromAbsNow() {
+        Double absInternal = readAbsInternalDegAveraged();
+        if (absInternal == null) return;
+
+        autoZeroFromAbsInternal(absInternal);
+        lastAbsInternalDeg = absInternal;
+        hasLastAbs = true;
+        lastAbsRezeroMs = System.currentTimeMillis();
+        absBadStreak = 0;
     }
 
     // =========================
@@ -691,17 +774,4 @@ public class SpindexerSubsystemPIDF {
 
         return selectFastestNonEmptySlot(currentAngle);
     }
-
-    public void rezeroFromAbsNow() {
-        Double absInternal = readAbsInternalDegAveraged();
-        if (absInternal == null) return;
-
-        autoZeroFromAbsInternal(absInternal);
-
-        lastAbsInternalDeg = absInternal;
-        hasLastAbs = true;
-        lastAbsRezeroMs = System.currentTimeMillis();
-        absBadStreak = 0;
-    }
-
 }
