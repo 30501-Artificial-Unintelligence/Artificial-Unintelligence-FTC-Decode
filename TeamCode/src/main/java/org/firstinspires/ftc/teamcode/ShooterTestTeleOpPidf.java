@@ -246,7 +246,7 @@ public class ShooterTestTeleOpPidf extends LinearOpMode {
                 wantIntake  = true;
             }
 
-            shooterOn = true;
+            shooterOn = wantShooter;
             intakeOn  = wantIntake;
 
             // ===== MANUAL FORCE-REGISTER FOR SPINDEXER (driver 2 bumpers) =====

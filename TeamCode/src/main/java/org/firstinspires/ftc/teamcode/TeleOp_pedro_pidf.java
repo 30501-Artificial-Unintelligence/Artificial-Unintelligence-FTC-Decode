@@ -16,6 +16,7 @@ import com.qualcomm.robotcore.eventloop.opmode.OpMode;
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
 
 import org.firstinspires.ftc.teamcode.pedroPathing.Constants;
+//import org.firstinspires.ftc.teamcode.pedroPathing.Drawing;
 import org.firstinspires.ftc.teamcode.subsystems.ShooterSubsystemPIDF;
 import org.firstinspires.ftc.teamcode.subsystems.LoaderSubsystem;
 import org.firstinspires.ftc.teamcode.subsystems.SpindexerSubsystem;
@@ -84,6 +85,8 @@ public class TeleOp_pedro_pidf extends OpMode {
         follower.update();
 
         telemetryM = PanelsTelemetry.INSTANCE.getTelemetry();
+        //Drawing.init(); // sets PEDRO_PATHING offsets for Panels field
+
 
         // Example lazy path: from current pose to (45, 98) with heading ~45°
         pathChain = () -> follower.pathBuilder()
@@ -128,12 +131,14 @@ public class TeleOp_pedro_pidf extends OpMode {
     public void loop() {
         // ===== UPDATE PEDRO FOLLOWER =====
         follower.update();
+        //Drawing.drawDebug(follower); // draws robot + path onto Panels field view
+
         telemetryM.update();
 
         // ===== DRIVETRAIN (match old TeleOp: gamepad2 sticks + slow mode on gamepad2.a) =====
-        double leftX  = gamepad2.left_stick_x;
-        double leftY  = gamepad2.left_stick_y;
-        double rightX = gamepad2.right_stick_x;
+        double leftX  = -gamepad2.left_stick_x;
+        double leftY  = -gamepad2.left_stick_y;
+        double rightX = -gamepad2.right_stick_x;
 
         boolean a2 = gamepad2.a;
         if (a2 && !prev2a) {
@@ -276,7 +281,7 @@ public class TeleOp_pedro_pidf extends OpMode {
         }
 
         // Match old TeleOp behavior: shooter always on, intake follows logic
-        shooterOn = true;         // if you want auto behavior instead, use: shooterOn = wantShooter;
+        shooterOn = wantShooter;         // if you want auto behavior instead, use: shooterOn = wantShooter;
         intakeOn  = wantIntake;
 
         // ===== MANUAL FORCE-REGISTER FOR SPINDEXER (driver 2 bumpers) =====
