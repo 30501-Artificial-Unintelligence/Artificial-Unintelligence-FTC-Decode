@@ -189,8 +189,8 @@ public class TeleOp_pedro_pidf extends OpMode {
         prevDpadR = dr;
 
         double stickX = gamepad1.right_stick_x;
-        if (Math.abs(stickX) > 0.05) turret.setManualPower(stickX * 0.4);
-        else turret.setManualPower(0.0);
+        if (Math.abs(stickX) > 0.05) turret.setManualPower(stickX * 0.5);
+
 
         turret.update();
 

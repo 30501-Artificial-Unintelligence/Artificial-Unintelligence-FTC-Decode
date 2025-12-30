@@ -48,6 +48,11 @@ public class TurretSubsystem {
 
     private double maxVoltage;
 
+    private double lastAbsRaw = 0.0;
+    private double absUnwrapped = 0.0;
+    private boolean absInit = false;
+
+
     public TurretSubsystem(HardwareMap hardwareMap) {
         turretMotor = hardwareMap.get(DcMotorEx.class, "turretMotor");
         turretAbs   = hardwareMap.get(AnalogInput.class, "turretABS");
@@ -98,7 +103,7 @@ public class TurretSubsystem {
      * Call at startup and any time we decide the tick-angle has drifted.
      */
     private void computeAngleOffsetFromAbs() {
-        double absAngle = getAbsTurretAngleDeg();   // what turret really is
+        double absAngle = getAbsTurretAngleDegContinuous();   // what turret really is
         int ticks = turretMotor.getCurrentPosition();
         double tickAngle = ticks / TICKS_PER_TURRET_DEG;
         angleOffsetDeg = absAngle - tickAngle;
@@ -109,7 +114,7 @@ public class TurretSubsystem {
      * You can call this in update() every loop.
      */
     private void resyncFromAbsIfNeeded() {
-        double absAngle  = getAbsTurretAngleDeg();
+        double absAngle  = getAbsTurretAngleDegContinuous();
         double tickAngle = getCurrentAngleDeg();
         double diff = wrapDeg(absAngle - tickAngle);
 
@@ -126,6 +131,29 @@ public class TurretSubsystem {
         int ticks = turretMotor.getCurrentPosition();
         return angleOffsetDeg + (ticks / TICKS_PER_TURRET_DEG);
     }
+
+    private double getAbsTurretAngleDegContinuous() {
+        double raw = getAbsAngle0to360(); // 0..360
+
+        if (!absInit) {
+            absInit = true;
+            lastAbsRaw = raw;
+            absUnwrapped = raw;
+        } else {
+            double delta = raw - lastAbsRaw;
+            // unwrap across 0/360 boundary
+            if (delta > 180) delta -= 360;
+            if (delta < -180) delta += 360;
+
+            absUnwrapped += delta;
+            lastAbsRaw = raw;
+        }
+
+        // now absUnwrapped is continuous degrees, still in "raw frame"
+        double rel = (absUnwrapped - ZERO_ABS_DEG) * ANGLE_DIRECTION;
+        return rel;
+    }
+
 
     public double getTargetAngleDeg() {
         return targetAngleDeg;
@@ -194,6 +222,7 @@ public class TurretSubsystem {
         turretMotor.setMode(DcMotor.RunMode.RUN_TO_POSITION);
         turretMotor.setPower(MAX_AUTO_POWER);
     }
+
 
     /**
      * Call this every loop from TeleOp / Auto.
