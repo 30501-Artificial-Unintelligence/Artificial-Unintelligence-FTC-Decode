@@ -16,6 +16,7 @@ import com.qualcomm.robotcore.eventloop.opmode.OpMode;
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
 import org.firstinspires.ftc.teamcode.subsystems.Drawing;
 import com.pedropathing.geometry.Pose;
+import com.qualcomm.robotcore.util.Range;
 
 
 import org.firstinspires.ftc.teamcode.pedroPathing.Constants;
@@ -24,6 +25,7 @@ import org.firstinspires.ftc.teamcode.subsystems.LoaderSubsystem;
 import org.firstinspires.ftc.teamcode.subsystems.SpindexerSubsystem_State_new;
 import org.firstinspires.ftc.teamcode.subsystems.TurretSubsystem;
 import org.firstinspires.ftc.teamcode.subsystems.IntakeSubsystem_Motor;
+import org.firstinspires.ftc.teamcode.subsystems.VisionSubsystem;
 
 import java.util.function.Supplier;
 
@@ -46,6 +48,7 @@ public class TeleOp_pedro_pidf extends OpMode {
     private SpindexerSubsystem_State_new spindexer;
     private LoaderSubsystem loader;
     private TurretSubsystem turret;
+    private VisionSubsystem vision;
 
     // ===== DASHBOARD =====
     private FtcDashboard dashboard;
@@ -93,6 +96,24 @@ public class TeleOp_pedro_pidf extends OpMode {
     private boolean autoFirePulse = false;
     private long autoFireCooldownUntil = 0;
 
+    // ===== TURRET TRACK TOGGLE =====
+    private boolean turretTrackEnabled = false;
+    private boolean prevTurretTrackToggle = false;
+
+    // ===== TURRET OWNER STATE =====
+    private boolean turretPositionCommandActive = false; // true after goToAngle until close enough
+
+    // Tunables (Dashboard if you want)
+    public static int TRACK_TAG_ID = 24;
+    public static double TRACK_KP = 0.02;          // power per deg of tx
+    public static double TRACK_MAX_POWER = 0.25;   // clamp
+    public static double TRACK_TX_DEADBAND = 0.5;  // deg
+    public static double TURRET_ANGLE_TOL_DEG = 3.0;
+
+    // ===== POST-PATH ACTIONS (auto home + relocalize once) =====
+    private boolean postPathActionsDone = false;
+    private long postPathActionsTimeMs = 0;
+
 
 
     @Override
@@ -129,6 +150,8 @@ public class TeleOp_pedro_pidf extends OpMode {
         intake    = new IntakeSubsystem_Motor(hardwareMap);
         spindexer = new SpindexerSubsystem_State_new(hardwareMap);
         turret    = new TurretSubsystem(hardwareMap);
+        vision    = new VisionSubsystem(hardwareMap);
+
 
         dashboard = FtcDashboard.getInstance();
         telemetry = new MultipleTelemetry(telemetry, dashboard.getTelemetry());
@@ -204,11 +227,31 @@ public class TeleOp_pedro_pidf extends OpMode {
             cancelShootAssist();
         }
 
-// If the path finished, give control back (but keep shoot mode active until you cancel)
         if (shootAssistActive && automatedDrive && !follower.isBusy()) {
+
+            // give drive control back
             follower.startTeleopDrive();
             automatedDrive = false;
+
+            // run these only once per shoot-assist run
+            if (!postPathActionsDone) {
+                // 1) Home turret to 0 deg
+                turret.goToAngle(0.0);
+                turretPositionCommandActive = true;
+
+                // 2) Relocalize using Limelight (MegaTag2)
+                Pose visionPose = vision.getPedroPoseFromLimelight(0, follower); // 0 = accept any tag
+                if (visionPose != null) {
+                    // Pedro-safe method you already have:
+                    follower.setStartingPose(visionPose);
+                    follower.update();
+                }
+
+                postPathActionsDone = true;
+                postPathActionsTimeMs = now;
+            }
         }
+
 
         // ===== Y edge (user OR auto-fire pulse) =====
         boolean yUser = gamepad1.y;
@@ -238,28 +281,65 @@ public class TeleOp_pedro_pidf extends OpMode {
         if (intakeOn) intake.startIntake();
         else intake.stopIntake();
 
-        // ===== TURRET CONTROL =====
+        // ===== TOGGLE TURRET TRACK MODE =====
+        boolean toggleTrack = gamepad1.x;
+        if (toggleTrack && !prevTurretTrackToggle) {
+            turretTrackEnabled = !turretTrackEnabled;
+        }
+        prevTurretTrackToggle = toggleTrack;
+
+
+        // ===== TURRET CONTROL (manual vs position vs vision track) =====
         boolean a  = gamepad1.a;
         boolean dl = gamepad1.dpad_left;
         boolean dr = gamepad1.dpad_right;
 
-        if (a && !prevA) turret.goToAngle(0.0);
-        if (dl && !prevDpadL) turret.goToAngle(90.0);
-        if (dr && !prevDpadR) turret.goToAngle(-90.0);
+        // Any time you issue a goToAngle, mark position mode as active
+        // (do this right after your a/dl/dr goToAngle calls)
+        if (a && !prevA) { turret.goToAngle(0.0);   turretPositionCommandActive = true; }
+        if (dl && !prevDpadL) { turret.goToAngle(90.0);  turretPositionCommandActive = true; }
+        if (dr && !prevDpadR) { turret.goToAngle(-90.0); turretPositionCommandActive = true; }
 
-        prevA = a;
-        prevDpadL = dl;
-        prevDpadR = dr;
+        // Clear position active once we’re close enough
+        if (turretPositionCommandActive) {
+            double err = turret.getTargetAngleDeg() - turret.getCurrentAngleDeg();
+            if (Math.abs(err) < TURRET_ANGLE_TOL_DEG) turretPositionCommandActive = false;
+        }
 
-        // Manual turret stick (does NOT cancel auto unless you actually move the stick)
         double stickX = gamepad1.right_stick_x;
         boolean manualActive = Math.abs(stickX) > 0.05;
 
         if (manualActive) {
+            // 1) Manual overrides everything
             turret.setManualPower(stickX * 0.5);
             turretManualOverride = true;
+            turretPositionCommandActive = false; // manual cancels position “ownership”
+        } else if (turretPositionCommandActive) {
+            // 2) Let RUN_TO_POSITION finish — DO NOT call setManualPower(0) here
+            // (motor will keep doing its thing)
+        } else if (turretTrackEnabled) {
+            // 3) Vision tracking (only when stick quiet AND not in position command)
+            double tx = vision.getTagTxDegOrNaN(TRACK_TAG_ID);
+
+            if (Double.isNaN(tx)) {
+                // no tag -> stop
+                turret.setManualPower(0.0);
+                turretManualOverride = false;
+            } else {
+                if (Math.abs(tx) < TRACK_TX_DEADBAND) {
+                    turret.setManualPower(0.0);
+                    turretManualOverride = false;
+                } else {
+                    double pwr = Range.clip(TRACK_KP * tx, -TRACK_MAX_POWER, TRACK_MAX_POWER);
+
+                    // If your turret moves the wrong direction, flip the sign:
+                    // pwr = -pwr;
+                    turret.setManualPower(pwr);
+                    turretManualOverride = true;
+                }
+            }
         } else {
-            // If we were manual last loop, explicitly stop the motor
+            // 0) Default behavior: stop when stick quiet
             if (turretManualOverride) {
                 turret.setManualPower(0.0);
                 turretManualOverride = false;
@@ -267,6 +347,7 @@ public class TeleOp_pedro_pidf extends OpMode {
         }
 
         turret.update();
+
 
         // ===== SPINDEXER STEP (state machine + PIDF + hold) =====
         //spindexer.periodic();
@@ -336,17 +417,21 @@ public class TeleOp_pedro_pidf extends OpMode {
         prev2RightBumper = rb2;
 
         if (shootAssistActive) {
+            boolean turretAtZero = Math.abs(turret.getCurrentAngleDeg()) < TURRET_ANGLE_TOL_DEG;
+
             boolean arrived = atPose(follower.getPose(), activeShootPose, 2.0, 6.0);
 
             double target = shooter.getTargetRpm();
             double current = shooter.getCurrentRpmEstimate();
             boolean rpmReady = Math.abs(target - current) < 150;
 
-            if (arrived && rpmReady && now > autoFireCooldownUntil) {
-                autoFirePulse = true;          // fires NEXT loop via yEdge OR
+            // require postPathActionsDone so we actually homed+relocalized first
+            if (postPathActionsDone && turretAtZero && arrived && rpmReady && now > autoFireCooldownUntil) {
+                autoFirePulse = true;
                 autoFireCooldownUntil = now + 800;
             }
         }
+
 
 
 
@@ -377,6 +462,10 @@ public class TeleOp_pedro_pidf extends OpMode {
 
         telemetry.addData("Pattern Tag", driverPatternTag);
         telemetry.addData("Pattern Order", spindexer.getGamePattern());
+        telemetry.addData("Turret Track", turretTrackEnabled);
+        telemetry.addData("Seen Tags", vision.getSeenTagIdsString());
+        telemetry.addData("Tag24 tx", "%.2f", vision.getTagTxDegOrNaN(24));
+
 
         telemetryM.debug("position", follower.getPose());
         telemetryM.debug("velocity", follower.getVelocity());
@@ -409,13 +498,19 @@ public class TeleOp_pedro_pidf extends OpMode {
         follower.followPath(buildLineToPose(target));
         automatedDrive = true;
         shootAssistActive = true;
+
+        postPathActionsDone = false; // reset for this run
     }
+
 
     private void cancelShootAssist() {
         follower.startTeleopDrive();
         automatedDrive = false;
         shootAssistActive = false;
+
+        postPathActionsDone = false;
     }
+
 
     private static double wrapRad(double r) {
         while (r > Math.PI) r -= 2.0 * Math.PI;
