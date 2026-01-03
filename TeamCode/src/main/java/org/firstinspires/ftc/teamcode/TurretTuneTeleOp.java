@@ -12,7 +12,7 @@ public class TurretTuneTeleOp extends LinearOpMode {
     public void runOpMode() {
         // Names must match your config
         DcMotorEx motor = hardwareMap.get(DcMotorEx.class, "spindexerMotor");
-        AnalogInput abs = hardwareMap.get(AnalogInput.class, "TurretABS");
+        AnalogInput abs = hardwareMap.get(AnalogInput.class, "turretABS");
 
         telemetry.addLine("Turret Manual Tune");
         telemetry.addLine("D-pad LEFT/RIGHT: bump the Turret a tiny amount");

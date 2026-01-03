@@ -19,7 +19,7 @@ import org.firstinspires.ftc.teamcode.subsystems.PoseStorage;
 import com.bylazar.field.FieldManager;
 import com.bylazar.field.PanelsField;
 
-@Autonomous(name = "Example Auto", group = "Examples")
+@Autonomous(name = "RedAutoUp", group = "Examples")
 public class RedAutoUp extends OpMode {
 
     // ============================
@@ -53,7 +53,7 @@ public class RedAutoUp extends OpMode {
     // ===== POSES / PATHS ========
     // ============================
     private final Pose startPose   = new Pose(109, 134, Math.toRadians(90));
-    private final Pose scorePose   = new Pose(87, 87, Math.toRadians(45));
+    private final Pose scorePose   = new Pose(80, 80, Math.toRadians(45));
     private final Pose prePickup1Pose = new Pose(99, 83.5, Math.toRadians(0));
     private final Pose pickup1Pose = new Pose(124, 83.5, Math.toRadians(0));
     private final Pose prePickup2Pose = new Pose(99, 59, Math.toRadians(0));

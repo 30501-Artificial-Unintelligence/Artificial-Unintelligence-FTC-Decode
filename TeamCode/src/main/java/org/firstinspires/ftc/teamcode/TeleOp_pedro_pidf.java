@@ -85,7 +85,7 @@ public class TeleOp_pedro_pidf extends OpMode {
     private boolean prevB1 = false;
 
     // ===== SHOOT POSES (tune these numbers) =====
-    public static Pose SHOOT_POSE_NEAR = new Pose(87, 87, Math.toRadians(45));
+    public static Pose SHOOT_POSE_NEAR = new Pose(80, 80, Math.toRadians(45));
     public static Pose SHOOT_POSE_FAR  = new Pose(84, 16, Math.toRadians(65));
 
     // ===== SHOOT ASSIST STATE =====
@@ -244,12 +244,12 @@ public class TeleOp_pedro_pidf extends OpMode {
                 turretPositionCommandActive = true;
 
                 // 2) Relocalize using Limelight (MegaTag2)
-                Pose visionPose = vision.getPedroPoseFromLimelight(0, follower); // 0 = accept any tag
-                if (visionPose != null) {
-                    // Pedro-safe method you already have:
-                    follower.setStartingPose(visionPose);
-                    follower.update();
-                }
+//                Pose visionPose = vision.getPedroPoseFromLimelight(0, follower); // 0 = accept any tag
+//                if (visionPose != null) {
+//                    // Pedro-safe method you already have:
+//                    follower.setStartingPose(visionPose);
+//                    follower.update();
+//                }
 
                 postPathActionsDone = true;
                 postPathActionsTimeMs = now;
