@@ -6,6 +6,7 @@ import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
 import com.bylazar.telemetry.PanelsTelemetry;
 import org.firstinspires.ftc.robotcore.external.Telemetry;
 
+import org.firstinspires.ftc.teamcode.subsystems.IntakeSubsystem_Motor;
 import org.firstinspires.ftc.teamcode.subsystems.SpindexerSubsystem_State_new;
 import org.firstinspires.ftc.teamcode.subsystems.SpindexerTuningConfig_new;
 
@@ -13,6 +14,7 @@ import org.firstinspires.ftc.teamcode.subsystems.SpindexerTuningConfig_new;
 public class SpindexerPIDFTunerTeleOp_State_new extends OpMode {
 
     private SpindexerSubsystem_State_new spindexer;
+    private IntakeSubsystem_Motor intake;
 
     // Panels telemetry handle (wrapper around Panels’ Telemetry)
     private Telemetry panelsTelemetry;
@@ -22,6 +24,7 @@ public class SpindexerPIDFTunerTeleOp_State_new extends OpMode {
     @Override
     public void init() {
         spindexer = new SpindexerSubsystem_State_new(hardwareMap);
+        intake = new IntakeSubsystem_Motor(hardwareMap);
 
         // === PANELS TELEMETRY SETUP (same pattern as your working OpMode) ===
         panelsTelemetry = PanelsTelemetry.INSTANCE.getTelemetry().getWrapper();
@@ -44,7 +47,7 @@ public class SpindexerPIDFTunerTeleOp_State_new extends OpMode {
         // Run spindexer state machine + PIDF.
         // Pass loader = null so only the spindexer spins.
         spindexer.update(panelsTelemetry, null, yEdge, tagOverride);
-
+        intake.startIntake();
         // ====== Driver Station telemetry (quick view) ======
         telemetry.addData("AngleCurr", "%.1f", spindexer.getCurrentAngleDeg());
         telemetry.addData("AngleTarget", "%.1f", spindexer.getTargetAngleDeg());

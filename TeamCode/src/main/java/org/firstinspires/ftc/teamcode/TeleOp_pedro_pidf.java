@@ -321,8 +321,8 @@ public class TeleOp_pedro_pidf extends OpMode {
         prevDpadR = dr;
 
         if (aEdge)  { turretAimMode = TurretAimMode.MANUAL_HOLD; turret.goToAngle(0.0);   turretPositionCommandActive = true; }
-        if (dlEdge) { turretAimMode = TurretAimMode.MANUAL_HOLD; turret.goToAngle(90.0);  turretPositionCommandActive = true; }
-        if (drEdge) { turretAimMode = TurretAimMode.MANUAL_HOLD; turret.goToAngle(-90.0); turretPositionCommandActive = true; }
+        if (dlEdge) { turretAimMode = TurretAimMode.MANUAL_HOLD; turret.goToAngle(-90.0);  turretPositionCommandActive = true; }
+        if (drEdge) { turretAimMode = TurretAimMode.MANUAL_HOLD; turret.goToAngle(90.0); turretPositionCommandActive = true; }
 
 
         // ===== MANUAL vs TRACKING vs HOLD =====
@@ -517,11 +517,38 @@ public class TeleOp_pedro_pidf extends OpMode {
         telemetry.addData("TurretAngle", "%.1f", turret.getCurrentAngleDeg());
         telemetry.addData("TurretTarget", "%.1f", turret.getTargetAngleDeg());
 
+        turret.addDebugTelemetry(telemetry);
+
+        double abs0to360 = turret.dbgAbs0to360Deg();
+        double absWrap180 = turret.dbgAbsTurretDegWrapped180();
+        double absCont    = turret.dbgAbsTurretDegContinuous();
+
+        int ticks          = turret.dbgTicks();
+        double tickAngle   = turret.dbgTickAngleDeg();
+        double offsetDeg   = turret.dbgAngleOffsetDeg();
+        double currentDeg  = turret.getCurrentAngleDeg();
+        double diff180     = turret.dbgAbsMinusCurrentDiff180();
+        double velTPS      = turret.dbgVelocityTicksPerSec();
 
         TelemetryPacket packet = new TelemetryPacket();
         packet.put("rpm", current);
         packet.put("target", target);
         packet.put("error", error);
+
+        telemetryM.addData("Turret/abs0to360", abs0to360);
+        telemetryM.addData("Turret/absWrap180", absWrap180);
+        telemetryM.addData("Turret/absContDeg", absCont);
+
+        telemetryM.addData("Turret/ticks", ticks);
+        telemetryM.addData("Turret/tickAngleDeg", tickAngle);
+        telemetryM.addData("Turret/offsetDeg", offsetDeg);
+        telemetryM.addData("Turret/currentDeg", currentDeg);
+
+        telemetryM.addData("Turret/absMinusCurDiff180", diff180);
+        telemetryM.addData("Turret/velTicksPerSec", velTPS);
+
+        telemetryM.addData("Turret/targetTicks", turret.dbgTargetTicks());
+        telemetryM.addData("Turret/mode", turret.dbgRunMode());
         dashboard.sendTelemetryPacket(packet);
 
         telemetry.update();

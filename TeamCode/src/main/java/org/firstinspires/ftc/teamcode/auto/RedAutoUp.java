@@ -12,6 +12,7 @@ import com.qualcomm.robotcore.eventloop.opmode.OpMode;
 import com.qualcomm.robotcore.util.Range;
 
 import org.firstinspires.ftc.teamcode.pedroPathing.Constants;
+import org.firstinspires.ftc.teamcode.subsystems.IntakeSubsystem_Motor;
 import org.firstinspires.ftc.teamcode.subsystems.LoaderSubsystem;
 import org.firstinspires.ftc.teamcode.subsystems.ShooterSubsystemPIDF;
 import org.firstinspires.ftc.teamcode.subsystems.SpindexerSubsystem_State_new;
@@ -54,17 +55,18 @@ public class RedAutoUp extends OpMode {
     private ShooterSubsystemPIDF shooter;
     private LoaderSubsystem loader;
     private SpindexerSubsystem_State_new spindexer;
+    private IntakeSubsystem_Motor intake;
     // ============================
     // ===== POSES / PATHS ========
     // ============================
-    private final Pose startPose   = new Pose(109, 134, Math.toRadians(90));
+    private final Pose startPose   = new Pose(108.6, 133.12, Math.toRadians(90));
     private final Pose scorePose   = new Pose(80, 80, Math.toRadians(45));
     private final Pose prePickup1Pose = new Pose(99, 83.5, Math.toRadians(0));
-    private final Pose pickup1Pose = new Pose(124, 83.5, Math.toRadians(0));
+    private final Pose pickup1Pose = new Pose(130, 83.5, Math.toRadians(0));
     private final Pose prePickup2Pose = new Pose(99, 59, Math.toRadians(0));
-    private final Pose pickup2Pose = new Pose(124, 59, Math.toRadians(0));
+    private final Pose pickup2Pose = new Pose(130, 59, Math.toRadians(0));
     private final Pose prePickup3Pose = new Pose(99, 35, Math.toRadians(0));
-    private final Pose pickup3Pose = new Pose(124, 35, Math.toRadians(0));
+    private final Pose pickup3Pose = new Pose(130, 35, Math.toRadians(0));
 
     private Path scorePreload;
     private PathChain goPrePickup1, creepToPickup1, scorePickup1, goPrePickup2, creepToPickup2,
@@ -195,6 +197,7 @@ public class RedAutoUp extends OpMode {
                     // We are at score pose. Ensure turret phase is homing, then wait for 0.
                     turretPhase = TurretPhase.HOMING_TO_ZERO;
                     setPathState(1);
+                    break;
                 }
 
             case 1:
@@ -205,7 +208,7 @@ public class RedAutoUp extends OpMode {
                 break;
 
             case 100:
-                if (updateShootSequence()) {
+                if (updateShootSequence(fieldPos, autoPatternTag)) {
                     follower.followPath(goPrePickup1, PWR_FAST, false);
                     setPathState(11);
                 }
@@ -394,8 +397,8 @@ public class RedAutoUp extends OpMode {
 
     private void startShootSequence() {
         shooting = true;
-        shootState = 0;
-        shootTimer.resetTimer();
+        yEdgeSent = false;
+        shootStartMs = System.currentTimeMillis();
     }
 
     private boolean updateShootSequence() {
@@ -520,7 +523,7 @@ public class RedAutoUp extends OpMode {
         shooter   = new ShooterSubsystemPIDF(hardwareMap);
         loader    = new LoaderSubsystem(hardwareMap);
         spindexer = new SpindexerSubsystem_State_new(hardwareMap);
-
+        intake = new IntakeSubsystem_Motor(hardwareMap);
 
         follower.setStartingPose(startPose);
         follower.update();
@@ -556,6 +559,13 @@ public class RedAutoUp extends OpMode {
         updateTurretControl();
         turret.update();
 
+        loader.updateLoader();
+
+// Keep spindexer state machine alive even when not shooting
+        boolean yEdge = false;
+        spindexer.update(telemetry, loader, yEdge, autoPatternTag);
+        intake.startIntake();   // ALWAYS ON
+
         drawRobotOnPanels(follower.getPose());
         autonomousPathUpdate();
         PoseStorage.lastPose = follower.getPose();
@@ -575,7 +585,7 @@ public class RedAutoUp extends OpMode {
         PoseStorage.lastPose = follower.getPose();
         PoseStorage.lastTurretAngleDeg = turret.getCurrentAngleDeg();
         if (turret != null) turret.goToAngle(turret.getCurrentAngleDeg());
-        ;
+        if (intake != null) intake.stopIntake();
     }
 
     // ============================

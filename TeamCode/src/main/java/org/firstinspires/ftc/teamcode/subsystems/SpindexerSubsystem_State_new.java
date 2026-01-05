@@ -56,7 +56,7 @@ public class SpindexerSubsystem_State_new {
 
     // Raw abs angle (deg) when SLOT 0 is perfectly at intake
     // i.e. absRaw == 245°  <=>  internal angle == 0°
-    private static final double ABS_MECH_OFFSET_DEG = (243.6); // maybe add 2-5 deg
+    private static final double ABS_MECH_OFFSET_DEG = (120.3+180); // maybe add 2-5 deg
 
     private static final double ABS_REZERO_THRESHOLD_DEG = 3.0;
 
@@ -65,6 +65,8 @@ public class SpindexerSubsystem_State_new {
     // If mag was NOT full when started shooting (give shooter more spin-up time)
     private static final long WAIT_BEFORE_LOADER_PARTIAL_MS = 2000;
     private static final long WAIT_AFTER_LOADER_MS          = 400;
+
+    private static final double MAX_POWER_EJECT = 0.75;
 
     // ==== HARDWARE ====
 
@@ -127,6 +129,22 @@ public class SpindexerSubsystem_State_new {
     // 21 = G, P, P
     //  0 = no valid tag -> fastest possible logic
     private int gameTag = 0;
+
+    // Only trust the intake sensors when near the commanded target angle
+    private static final double SENSE_WINDOW_DEG = 30.0;
+
+    // Debounce so 1 noisy frame doesn't register a ball
+    private static final long BALL_PRESENT_DEBOUNCE_MS = 80;
+
+    private long ballPresentSinceMs = 0;
+    private boolean ballPresentDebounced = false;
+
+    private static final long EJECT_ROTATE_TIMEOUT_MS = 1600; // tune
+    private static final double LOAD_TIMEOUT_TOL_DEG = 12.0;  // accept if close-ish on timeout
+
+    private long ejectStateStartMs = 0;
+    private boolean ejectSlotChosen = false;
+    private boolean ejectRetried = false;
 
     public SpindexerSubsystem_State_new(HardwareMap hardwareMap) {
         motor = hardwareMap.get(DcMotorEx.class, "spindexerMotor");
@@ -334,7 +352,10 @@ public class SpindexerSubsystem_State_new {
         double ff = f * Math.signum(errorDeg);
 
         double output = p * errorDeg + i * angleIntegral + d * derivative + ff;
-        double power = Range.clip(output, -MAX_POWER, MAX_POWER);
+        //double power = Range.clip(output, -MAX_POWER, MAX_POWER);
+        double maxPwr = ejecting ? MAX_POWER_EJECT : MAX_POWER;
+        double power = Range.clip(output, -maxPwr, maxPwr);
+
 
         motor.setPower(power);
     }
@@ -415,6 +436,7 @@ public class SpindexerSubsystem_State_new {
     }
 
     private Ball detectBallColor() {
+        if (!inSenseWindow()) return Ball.EMPTY;
         final double THRESH_CM = 5.0;
 
         double d1 = intakeColor.getDistance(DistanceUnit.CM);
@@ -608,6 +630,9 @@ public class SpindexerSubsystem_State_new {
                 // Normal case: we have tracked balls, shoot according to slots[] + pattern
                 ejecting = true;
                 ejectState = EjectState.ROTATING_TO_LOAD;
+                ejectSlotChosen = false;
+                ejectRetried = false;
+                ejectStateStartMs = now;
                 patternStep = 0;
                 startedWithFullMag = isFull();   // true if we had 3 balls when we started
 
@@ -637,13 +662,16 @@ public class SpindexerSubsystem_State_new {
         }
 
         // --- AUTO INTAKE STATE MACHINE ---
-        boolean ballPresent = isBallPresent();
+        boolean rawPresent = inSenseWindow() && rawBallPresentDistance();
+        boolean ballPresent = debouncedBallPresent(rawPresent, now);
+
 
         switch (autoIntakeState) {
             case IDLE:
                 // Look for a new ball in the current intake slot
                 if (!isFull()
                         && ballPresent
+                        && !lastBallPresent              // only on rising edge
                         && slots[intakeIndex] == Ball.EMPTY
                         && !ejecting) {
 
@@ -691,7 +719,6 @@ public class SpindexerSubsystem_State_new {
             switch (ejectState) {
                 case ROTATING_TO_LOAD:
                     if (!hasAnyBall()) {
-                        // Nothing left to shoot in our internal model
                         homeToIntake();
                         ejecting = false;
                         startedWithFullMag = false;
@@ -699,31 +726,65 @@ public class SpindexerSubsystem_State_new {
                         break;
                     }
 
-                    // If we just entered this state, pick which slot to shoot
-                    // (Whenever we re-enter ROTATING_TO_LOAD, we pick again)
-                    ejectSlotIndex = selectNextEjectSlotIndex();
-                    if (ejectSlotIndex < 0 || ejectSlotIndex >= SLOT_COUNT) {
-                        homeToIntake();
-                        ejecting = false;
-                        startedWithFullMag = false;
-                        ejectState = EjectState.IDLE;
-                        break;
+                    // Choose the slot ONCE per shot
+                    if (!ejectSlotChosen) {
+                        ejectSlotIndex = selectNextEjectSlotIndex();
+                        if (ejectSlotIndex < 0 || ejectSlotIndex >= SLOT_COUNT) {
+                            homeToIntake();
+                            ejecting = false;
+                            startedWithFullMag = false;
+                            ejectState = EjectState.IDLE;
+                            break;
+                        }
+
+                        commandSlotToLoad(ejectSlotIndex);
+                        ejectSlotChosen = true;
+                        ejectStateStartMs = now;
+                    } else {
+                        // keep commanding the same slot target
+                        commandSlotToLoad(ejectSlotIndex);
                     }
 
-                    // Command that slot to LOAD
-                    commandSlotToLoad(ejectSlotIndex);
-
-                    // Wait until the slot is actually at LOAD
+                    // Normal success condition
                     if (isSlotAtLoadPosition(ejectSlotIndex)) {
-                        long delayMs = startedWithFullMag
-                                ? WAIT_BEFORE_LOADER_FULL_MS
-                                : WAIT_BEFORE_LOADER_PARTIAL_MS;
-
+                        long delayMs = startedWithFullMag ? WAIT_BEFORE_LOADER_FULL_MS : WAIT_BEFORE_LOADER_PARTIAL_MS;
                         ejectPhaseTime = now + delayMs;
                         ejectState = EjectState.WAIT_BEFORE_LOADER;
-
-                        // After the first shot, treat as "full" for subsequent ones (short delay)
                         startedWithFullMag = true;
+                        break;
+                    }
+
+                    // Timeout recovery
+                    if (now - ejectStateStartMs > EJECT_ROTATE_TIMEOUT_MS) {
+                        double loadAngle = slotCenterAngleAtLoad(ejectSlotIndex);
+                        double err = smallestAngleDiff(loadAngle, getCurrentAngleDeg());
+
+                        // If we're "close enough" but not inside tick-tolerance, just proceed
+                        if (Math.abs(err) <= LOAD_TIMEOUT_TOL_DEG) {
+                            long delayMs = startedWithFullMag ? WAIT_BEFORE_LOADER_FULL_MS : WAIT_BEFORE_LOADER_PARTIAL_MS;
+                            ejectPhaseTime = now + delayMs;
+                            ejectState = EjectState.WAIT_BEFORE_LOADER;
+                            startedWithFullMag = true;
+                            break;
+                        }
+
+                        // Otherwise: one retry with abs rezero + PID reset
+                        if (!ejectRetried) {
+                            ejectRetried = true;
+
+                            autoZeroFromAbs();      // snap ticks->angle mapping
+                            angleIntegral = 0.0;
+                            lastAngleErrorDeg = 0.0;
+
+                            commandSlotToLoad(ejectSlotIndex);
+                            ejectStateStartMs = now;
+                        } else {
+                            // Give up safely
+                            homeToIntake();
+                            ejecting = false;
+                            startedWithFullMag = false;
+                            ejectState = EjectState.IDLE;
+                        }
                     }
                     break;
 
@@ -758,7 +819,11 @@ public class SpindexerSubsystem_State_new {
                             ejectState = EjectState.IDLE;
                         } else {
                             // Continue to next shot
+                            ejectSlotChosen = false;
+                            ejectRetried = false;
                             ejectState = EjectState.ROTATING_TO_LOAD;
+                            ejectStateStartMs = now;
+
                         }
                     }
                     break;
@@ -931,4 +996,40 @@ public class SpindexerSubsystem_State_new {
                     intakeIndex, slots[intakeIndex]);
         }
     }
+
+    private boolean inSenseWindow() {
+        // compare current angle to the targetAngleDeg
+        double diff = smallestAngleDiff(getCurrentAngleDeg(), targetAngleDeg);
+        return Math.abs(diff) <= SENSE_WINDOW_DEG;
+    }
+
+    private boolean rawBallPresentDistance() {
+        final double THRESH_CM = 5.0;
+
+        double d1 = intakeColor.getDistance(DistanceUnit.CM);
+        double d2 = intakeColor2.getDistance(DistanceUnit.CM);
+
+        boolean present1 = !Double.isNaN(d1) && d1 <= THRESH_CM;
+        boolean present2 = !Double.isNaN(d2) && d2 <= THRESH_CM;
+
+        return present1 || present2;
+    }
+
+    private boolean debouncedBallPresent(boolean rawPresent, long nowMs) {
+        if (!rawPresent) {
+            ballPresentSinceMs = 0;
+            ballPresentDebounced = false;
+            return false;
+        }
+
+        if (!ballPresentDebounced) {
+            if (ballPresentSinceMs == 0) ballPresentSinceMs = nowMs;
+            if (nowMs - ballPresentSinceMs >= BALL_PRESENT_DEBOUNCE_MS) {
+                ballPresentDebounced = true;
+            }
+        }
+
+        return ballPresentDebounced;
+    }
+
 }

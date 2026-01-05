@@ -8,8 +8,9 @@ import com.qualcomm.robotcore.hardware.HardwareMap;
 import com.qualcomm.robotcore.util.Range;
 import org.firstinspires.ftc.teamcode.subsystems.PoseStorage;
 import com.pedropathing.geometry.Pose;
+import com.bylazar.configurables.annotations.Configurable;
 
-
+@Configurable
 public class TurretSubsystem {
     // =========================
     // Motor / gear constants
@@ -28,11 +29,11 @@ public class TurretSubsystem {
     private static final double MIN_ANGLE_DEG = -200.0;
     private static final double MAX_ANGLE_DEG =  200.0;
 
-    private static final double MAX_AUTO_POWER = 0.5;
+    private static final double MAX_AUTO_POWER = 0.85;
 
     // Resync only when stopped; only if we drift more than this
     private static final double RESYNC_THRESHOLD_DEG = 5.0;
-    private static final double STOP_VELOCITY_TPS = 80.0; // ticks/sec; tune 50~200
+    private static final double STOP_VELOCITY_TPS = 50.0; // ticks/sec; tune 50~200
 
     // =========================
     // Hardware
@@ -42,7 +43,9 @@ public class TurretSubsystem {
 
     // Abs encoder calibration:
     // raw abs angle (0..360) when turret is at "0°" (centered / your chosen zero)
-    private static final double ZERO_ABS_DEG = 190.3;   // calibrate
+    private static final double ZERO_ABS_DEG = 115.3;   // calibrate
+
+    public static double OFFSET_TRIM_DEG = 0.0;
     // Flip if abs increases opposite your positive turret direction
     private static final double ANGLE_DIRECTION = 1.0;  // or -1.0
 
@@ -67,6 +70,20 @@ public class TurretSubsystem {
 
     // Small deadband so we don’t spam new targets when dx/dy are tiny
     private static final double FACE_TARGET_MIN_DIST_IN = 0.5;
+
+    // =========================
+// Resync gating (prevents offset changing while moving)
+// =========================
+    private int stillLoops = 0;
+    private int lastTicksForStill = 0;
+
+    // Tune these
+    private static final int   STILL_LOOPS_REQUIRED = 10; // ~200ms at 50Hz loop
+    private static final int   STILL_TICKS_EPS      = 1;  // max tick change per loop to be "still"
+    private static final double STILL_VEL_TPS_EPS   = 10.0; // max |velocity| to be "still"
+
+
+
 
     /**
      * Static carry-over within the same RC app session (Auto -> TeleOp, etc.)
@@ -282,20 +299,20 @@ public class TurretSubsystem {
     public void goToAngle(double commandedAngleDeg) {
         positionMode = true;
 
-        double absNow = getAbsTurretAngleDegContinuous();
-        targetAngleDeg = wrapCommandToLimits(commandedAngleDeg, absNow);
+        // Use the SAME angle estimate you display and use for limits
+        double currentDeg = getCurrentAngleDeg();
 
-        // Do NOT wrap this error to [-180,180]; turret window is 400°.
-        double errorDeg = targetAngleDeg - absNow;
+        // Wrap command into your mechanical window, choosing the closest equivalent
+        targetAngleDeg = wrapCommandToLimits(commandedAngleDeg, currentDeg);
 
-        int currentTicks = turretMotor.getCurrentPosition();
-        int deltaTicks = (int) Math.round(errorDeg * TICKS_PER_TURRET_DEG);
-        int targetTicks = currentTicks + deltaTicks;
+        // Convert directly to an absolute tick target (stable + repeatable)
+        int targetTicks = turretDegToTicks(targetAngleDeg);
 
         turretMotor.setTargetPosition(targetTicks);
         turretMotor.setMode(DcMotor.RunMode.RUN_TO_POSITION);
         turretMotor.setPower(MAX_AUTO_POWER);
     }
+
 
     // =========================
     // Tracking mode
@@ -305,20 +322,38 @@ public class TurretSubsystem {
     public void setTrackEnabled(boolean enabled) { trackEnabled = enabled; }
     public boolean isTrackEnabled() { return trackEnabled; }
 
+    private static final double VISION_DEADBAND_DEG = 0.15; // was 0.4
+    private static final double VISION_GAIN = 2.0;          // 1.0–1.6
+    private static final double VISION_MAX_STEP_DEG = 50.0; // cap per loop
+
     public void trackWithTxDeg(double txDeg) {
         if (!trackEnabled) return;
-        if (Double.isNaN(txDeg) || Math.abs(txDeg) < 0.4) return;
+        if (Double.isNaN(txDeg)) return;
 
-        // Camera on turret: tx ~ turret error
-        double newTarget = getCurrentAngleDeg() + txDeg; // flip sign if needed
+        if (Math.abs(txDeg) < VISION_DEADBAND_DEG) return;
+
+        // More aggressive correction, but clamp
+        double stepDeg = Range.clip(txDeg * VISION_GAIN, -VISION_MAX_STEP_DEG, VISION_MAX_STEP_DEG);
+
+        // If your tx sign is flipped, change + to -
+        double newTarget = getCurrentAngleDeg() + stepDeg;
+
         goToAngle(newTarget);
     }
+
 
     // Wrap degrees to [-180, 180)
     private static double wrapDeg180(double a) {
         while (a >= 180.0) a -= 360.0;
         while (a <  -180.0) a += 360.0;
         return a;
+    }
+
+    /** Convert a turret angle (deg) to an absolute motor encoder target (ticks). */
+    private int turretDegToTicks(double turretDeg) {
+        // currentDeg = angleOffsetDeg + ticks / TICKS_PER_TURRET_DEG
+        // => ticks = (turretDeg - angleOffsetDeg) * TICKS_PER_TURRET_DEG
+        return (int) Math.round((turretDeg - angleOffsetDeg) * TICKS_PER_TURRET_DEG);
     }
 
     /**
@@ -379,7 +414,7 @@ public class TurretSubsystem {
 
         // Desired turret-relative angle so turret points at that field bearing
         // (turret 0 = robot forward)
-        double desiredTurretDeg = wrapDeg180(targetFieldDeg - robotHeadingDeg - TURRET_MOUNT_OFFSET_DEG);
+        double desiredTurretDeg = -wrapDeg180(targetFieldDeg - robotHeadingDeg - TURRET_MOUNT_OFFSET_DEG);
 
         // Pick best equivalent inside mechanical limits, minimizing motion
         double currentTurretDeg = getCurrentAngleDeg();
@@ -402,9 +437,95 @@ public class TurretSubsystem {
         // Save a continuous angle for the next OpMode (Auto -> TeleOp)
         PoseStorage.lastTurretAngleDeg = getCurrentAngleDeg();
 
-        // Only resync when basically stopped (prevents offset jumping mid-move)
-        if (Math.abs(turretMotor.getVelocity()) < STOP_VELOCITY_TPS) {
-            resyncFromAbsIfNeeded();
-        }
+//        // Only resync when basically stopped (prevents offset jumping mid-move)
+//        if (Math.abs(turretMotor.getVelocity()) < STOP_VELOCITY_TPS) {
+//            resyncFromAbsIfNeeded();
+//        }
     }
+
+    // =========================
+// Debug / Telemetry helpers
+// =========================
+    public void addDebugTelemetry(org.firstinspires.ftc.robotcore.external.Telemetry tele) {
+        int ticks = turretMotor.getCurrentPosition();
+        double tickAngle = ticks / TICKS_PER_TURRET_DEG;
+
+        // Raw ABS 0..360
+        double abs0to360 = getAbsAngle0to360();
+
+        // Continuous ABS turret-frame angle
+        double absTurret = getAbsTurretAngleDegContinuous();
+
+        tele.addData("Turret/ticks", ticks);
+        tele.addData("Turret/tickAngleDeg", "%.2f", tickAngle);
+        tele.addData("Turret/offsetDeg", "%.2f", angleOffsetDeg);
+        tele.addData("Turret/currentDeg", "%.2f", getCurrentAngleDeg());
+
+        tele.addData("Turret/ABS0to360", "%.2f", abs0to360);
+        tele.addData("Turret/ABS_contDeg", "%.2f", absTurret);
+
+        // Difference between ABS and tick-based (small wrapped diff)
+        double diff = wrap180(absTurret - getCurrentAngleDeg());
+        tele.addData("Turret/ABS-ticksDiff180", "%.2f", diff);
+
+        // Useful constants to sanity check
+        tele.addData("Turret/ticksPerDeg", "%.4f", TICKS_PER_TURRET_DEG);
+        tele.addData("Turret/zeroAbsDeg", "%.2f", ZERO_ABS_DEG);
+        tele.addData("Turret/absDir", "%.0f", ANGLE_DIRECTION);
+    }
+
+    // =========================
+// Debug getters for Panels
+// =========================
+
+    // Raw ABS 0..360 (no calibration)
+    public double dbgAbs0to360Deg() {
+        return getAbsAngle0to360();
+    }
+
+    // ABS mapped into turret frame using ZERO_ABS_DEG + ANGLE_DIRECTION (NOT unwrapped)
+    public double dbgAbsTurretDegWrapped180() {
+        double a = (getAbsAngle0to360() - ZERO_ABS_DEG) * ANGLE_DIRECTION;
+        return wrap180(a);
+    }
+
+    // Continuous ABS turret angle (unwrapped, can exceed +/-180)
+    public double dbgAbsTurretDegContinuous() {
+        return getAbsTurretAngleDegContinuous();
+    }
+
+    // Motor ticks and tick-based angle (no offset)
+    public int dbgTicks() {
+        return turretMotor.getCurrentPosition();
+    }
+
+    public double dbgTickAngleDeg() {
+        return dbgTicks() / TICKS_PER_TURRET_DEG;
+    }
+
+    // The offset used by getCurrentAngleDeg()
+    public double dbgAngleOffsetDeg() {
+        return angleOffsetDeg;
+    }
+
+    // Difference between ABS continuous and tick-based current (wrapped to [-180, 180))
+    public double dbgAbsMinusCurrentDiff180() {
+        double abs = dbgAbsTurretDegContinuous();
+        double cur = getCurrentAngleDeg();
+        return wrap180(abs - cur);
+    }
+
+    // Useful motor state
+    public double dbgVelocityTicksPerSec() {
+        return turretMotor.getVelocity();
+    }
+
+    public int dbgTargetTicks() {
+        return turretMotor.getTargetPosition();
+    }
+
+    public String dbgRunMode() {
+        return turretMotor.getMode().toString();
+    }
+
 }
