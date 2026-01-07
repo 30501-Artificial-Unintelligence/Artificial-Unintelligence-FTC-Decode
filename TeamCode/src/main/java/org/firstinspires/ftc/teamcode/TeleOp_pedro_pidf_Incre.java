@@ -15,13 +15,15 @@ import com.pedropathing.paths.PathChain;
 import com.qualcomm.robotcore.eventloop.opmode.OpMode;
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
 import com.qualcomm.robotcore.util.Range;
+import com.bylazar.utils.LoopTimer;
 
 import org.firstinspires.ftc.teamcode.pedroPathing.Constants;
 import org.firstinspires.ftc.teamcode.subsystems.Drawing;
 import org.firstinspires.ftc.teamcode.subsystems.IntakeSubsystem_Motor;
 import org.firstinspires.ftc.teamcode.subsystems.LoaderSubsystem;
 import org.firstinspires.ftc.teamcode.subsystems.PoseStorage;
-import org.firstinspires.ftc.teamcode.subsystems.ShooterSubsystemPIDF;
+import org.firstinspires.ftc.teamcode.subsystems.ShooterSubsystemFF;
+import org.firstinspires.ftc.teamcode.subsystems.SpindexerSubsystem_State_new;
 import org.firstinspires.ftc.teamcode.subsystems.SpindexerSubsystem_State_new_Incremental;
 import org.firstinspires.ftc.teamcode.subsystems.TurretSubsystemIncremental;
 import org.firstinspires.ftc.teamcode.subsystems.VisionSubsystem;
@@ -39,10 +41,11 @@ public class TeleOp_pedro_pidf_Incre extends OpMode {
     private Supplier<PathChain> pathChain;
     private TelemetryManager telemetryM;
 
+
     private boolean slowMode = false;
 
     // ===== SUBSYSTEMS =====
-    private ShooterSubsystemPIDF shooter;
+    private ShooterSubsystemFF shooter;
     private IntakeSubsystem_Motor intake;
     private SpindexerSubsystem_State_new_Incremental spindexer;
     private LoaderSubsystem loader;
@@ -111,6 +114,15 @@ public class TeleOp_pedro_pidf_Incre extends OpMode {
     // ===== POST-PATH ACTIONS =====
     private boolean postPathActionsDone = false;
 
+    private final LoopTimer loopTimer = new LoopTimer(10); // smoothing window
+    private boolean loopTimerPrimed = false;
+
+    private long worstMs = 0;
+
+    private long lastPanelsUpdateMs = 0;
+    private static final long PANELS_PERIOD_MS = 100; // 10 Hz
+
+
     @Override
     public void init() {
         follower = Constants.createFollower(hardwareMap);
@@ -138,7 +150,7 @@ public class TeleOp_pedro_pidf_Incre extends OpMode {
                 )
                 .build();
 
-        shooter   = new ShooterSubsystemPIDF(hardwareMap);
+        shooter   = new ShooterSubsystemFF(hardwareMap);
         loader    = new LoaderSubsystem(hardwareMap);
         intake    = new IntakeSubsystem_Motor(hardwareMap);
         spindexer = new SpindexerSubsystem_State_new_Incremental(hardwareMap);
@@ -150,6 +162,11 @@ public class TeleOp_pedro_pidf_Incre extends OpMode {
 
         telemetry.addLine("TeleOp with Pedro + Shooter PIDF (Incremental)");
         telemetry.update();
+
+        loopTimer.start();      // prime the timer so the first loop has a start()
+        loopTimerPrimed = true;
+        worstMs = 0;
+
     }
 
     @Override
@@ -167,9 +184,38 @@ public class TeleOp_pedro_pidf_Incre extends OpMode {
     public void loop() {
         long now = System.currentTimeMillis();
 
+//        if (loopTimerPrimed) {
+//            loopTimer.end();              // measures time since last start()
+//            long ms = loopTimer.getMs();
+//            double hz = loopTimer.getHz();
+//
+//            if (ms > worstMs) worstMs = ms;
+//
+//            // Panels text
+//            telemetryM.debug(String.format("Loop: %d ms | %.1f Hz | worst: %d ms", ms, hz, worstMs));
+//
+//            // Panels graphs
+//            telemetryM.addData("loop/ms", ms);
+//            telemetryM.addData("loop/hz", hz);
+//            telemetryM.addData("loop/worst_ms", worstMs);
+//
+//            // push to panels (and DS if you pass DS telemetry into telemetryM)
+//            long nowMs = System.currentTimeMillis();
+//
+//            if (nowMs - lastPanelsUpdateMs >= PANELS_PERIOD_MS) {
+//                lastPanelsUpdateMs = nowMs;
+//                telemetryM.update(telemetry);
+//                telemetry.update();
+//            }
+//
+//        }
+
+// restart timer for next loop interval
+        //loopTimer.start();
+
         // ===== UPDATE PEDRO FOLLOWER =====
         follower.update();
-        telemetryM.update();
+        //telemetryM.update();
 
         Drawing.drawRobot(follower.getPose());
         Drawing.sendPacket();
@@ -409,6 +455,40 @@ public class TeleOp_pedro_pidf_Incre extends OpMode {
         // record pose
         PoseStorage.lastPose = follower.getPose();
 
+        double targetRpm = shooter.getTargetRpm();
+        double curRpm    = shooter.getVelocityRpm();        // or getCurrentRpmEstimate()
+        double errRpm    = targetRpm - curRpm;
+
+        double targetTps = shooter.getTargetTps();
+        double velTps    = shooter.getVelocityTps();
+        double errTps    = targetTps - velTps;
+
+// ---- Panels graphs/text ----
+        telemetryM.addData("shooter/target_rpm", targetRpm);
+        telemetryM.addData("shooter/rpm", curRpm);
+        telemetryM.addData("shooter/err_rpm", errRpm);
+
+        telemetryM.addData("shooter/target_tps", targetTps);
+        telemetryM.addData("shooter/vel_tps", velTps);
+        telemetryM.addData("shooter/err_tps", errTps);
+
+        telemetryM.addData("shooter/power_cmd", shooter.getPowerCmd());
+        telemetryM.addData("shooter/ff", shooter.getFF());
+
+// sanity checks (so you can prove kv/ks are actually 0)
+        telemetryM.addData("shooter/kV", shooter.getKv());
+        telemetryM.addData("shooter/kS", shooter.getKs());
+        telemetryM.addData("shooter/isOn", shooter.isOn());
+        telemetryM.addData("shooterOnCmd", shooterOn);
+
+// ---- DS telemetry (optional) ----
+        telemetry.addData("Target RPM", "%.0f", targetRpm);
+        telemetry.addData("RPM", "%.0f", curRpm);
+        telemetry.addData("RPM Err", "%.0f", errRpm);
+        telemetry.addData("cmd(lastPowerCmd)", "%.3f", shooter.getPowerCmd());
+        telemetry.addData("ff", "%.3f", shooter.getFF());
+
+
         // ===== TELEMETRY =====
         boolean readyForIntake = !ejecting; // since subsystem doesn't expose isAutoRotating()
 
@@ -437,24 +517,42 @@ public class TeleOp_pedro_pidf_Incre extends OpMode {
         telemetry.addData("Pattern Tag", driverPatternTag);
         telemetry.addData("Pattern", patternStringForTag(driverPatternTag));
 
-        telemetry.addData("Seen Tags", vision.getSeenTagIdsString());
-        telemetry.addData("Goal tx", "%.2f", vision.getGoalTxDegOrNaN());
+//        telemetry.addData("Seen Tags", vision.getSeenTagIdsString());
+//        telemetry.addData("Goal tx", "%.2f", vision.getGoalTxDegOrNaN());
 
         telemetryM.debug("position", follower.getPose());
-        telemetryM.debug("velocity", follower.getVelocity());
+//        telemetryM.debug("velocity", follower.getVelocity());
         telemetryM.debug("automatedDrive", automatedDrive);
 
         telemetry.addData("TurretMode", turretAimMode);
         telemetry.addData("TurretAngle", "%.1f", turret.getCurrentAngleDeg());
         telemetry.addData("TurretTarget", "%.1f", turret.getTargetAngleDeg());
+        telemetryM.addData("Target RPM", targetRpm);
+        telemetryM.addData("RPM",  curRpm);
+        telemetryM.addData("RPM Err",  errRpm);
 
-        TelemetryPacket packet = new TelemetryPacket();
-        packet.put("rpm", current);
-        packet.put("target", target);
-        packet.put("error", error);
-        dashboard.sendTelemetryPacket(packet);
+        telemetry.addData("cmd(lastPowerCmd)", shooter.getPowerCmd());
+        telemetry.addData("ff", shooter.getFF());
+        telemetry.addData("vel(tps)", shooter.getVelocityTps());
 
-        telemetry.update();
+
+//        TelemetryPacket packet = new TelemetryPacket();
+//        packet.put("rpm", current);
+//        packet.put("target", target);
+//        packet.put("error", error);
+//        dashboard.sendTelemetryPacket(packet);
+
+        //spindexer.debugColorTelemetry(telemetry, now);
+
+        //telemetry.update();
+
+        long nowMs = System.currentTimeMillis();
+
+        if (nowMs - lastPanelsUpdateMs >= PANELS_PERIOD_MS) {
+            lastPanelsUpdateMs = nowMs;
+            telemetryM.update(telemetry);
+            telemetry.update();
+        }
     }
 
     private PathChain buildLineToPose(Pose target) {

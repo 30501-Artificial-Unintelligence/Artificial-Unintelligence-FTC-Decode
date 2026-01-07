@@ -25,7 +25,7 @@ import org.firstinspires.ftc.teamcode.subsystems.SpindexerTuningConfig_new;
 public class SpindexerSubsystem_State_new_Incremental {
 
     // ==== Panels tunables (no external config class dependency) ====
-    public static double kP = 0.01;
+    public static double kP = 0.008;
     public static double kI = 0.0;
     public static double kD = 0.0;
     public static double kF = 0.0;
@@ -58,26 +58,26 @@ public class SpindexerSubsystem_State_new_Incremental {
     private static final double LOAD_ANGLE   = 180.0;    // load is opposite intake
     private static final int SLOT_COUNT = 3;
 
-    private static final int TOLERANCE_TICKS = 4;
+    private static final int TOLERANCE_TICKS = 10;
 
     // PID output limits
     private static final double MAX_POWER = 0.5;
-    private static final double MAX_POWER_EJECT = 0.7;
+    private static final double MAX_POWER_EJECT = 0.5;
 
     // If mag was full when started shooting
-    private static final long WAIT_BEFORE_LOADER_FULL_MS    = 700;
+    private static final long WAIT_BEFORE_LOADER_FULL_MS    = 400;
     private static final long WAIT_BEFORE_LOADER_PARTIAL_MS = 2000;
-    private static final long WAIT_AFTER_LOADER_MS          = 400;
+    private static final long WAIT_AFTER_LOADER_MS          = 300;
 
     // Only trust intake sensors when near the commanded target angle
     private static final double SENSE_WINDOW_DEG = 30.0;
 
     // Debounce so 1 noisy frame doesn't register a ball
-    private static final long BALL_PRESENT_DEBOUNCE_MS = 80;
+    private static final long BALL_PRESENT_DEBOUNCE_MS = 50;
 
     // Timeouts so auto never deadlocks
-    private static final long ROTATE_TO_LOAD_TIMEOUT_MS = 1200;
-    private static final long EJECT_TOTAL_TIMEOUT_MS    = 8000;
+    private static final long ROTATE_TO_LOAD_TIMEOUT_MS = 2000;
+    private static final long EJECT_TOTAL_TIMEOUT_MS    = 12000;
     private static final int ROTATE_MAX_RETRIES = 2;
 
     // ==== HARDWARE ====
@@ -122,6 +122,11 @@ public class SpindexerSubsystem_State_new_Incremental {
     private long ejectSequenceStartMs = 0;
     private long ejectStateStartMs = 0;
     private int rotateRetryCount = 0;
+
+    private Ball pendingColor = Ball.EMPTY;
+    private long pendingColorSinceMs = 0;
+    private static final long COLOR_STABLE_MS = 70; // try 50–120
+
 
     // ==== PATTERN / TAG ====
     // 23 = P,P,G ; 22 = P,G,P ; 21 = G,P,P ; 0 = no pattern
@@ -345,7 +350,7 @@ public class SpindexerSubsystem_State_new_Incremental {
     }
 
     private boolean rawBallPresentDistance() {
-        final double THRESH_CM = 5.0;
+        final double THRESH_CM = 3.0;
 
         double d1 = intakeColor.getDistance(DistanceUnit.CM);
         double d2 = intakeColor2.getDistance(DistanceUnit.CM);
@@ -613,22 +618,42 @@ public class SpindexerSubsystem_State_new_Incremental {
         switch (autoIntakeState) {
             case IDLE:
                 if (!isFull()
-                        && ballPresent
-                        && !lastBallPresent
-                        && slots[intakeIndex] == Ball.EMPTY
-                        && !ejecting) {
+                        && !ejecting
+                        && slots[intakeIndex] == Ball.EMPTY) {
 
-                    Ball color = detectBallColor();
-                    if (color == Ball.GREEN || color == Ball.PURPLE) {
-                        slots[intakeIndex] = color;
-                        if (telemetry != null) telemetry.addData("AutoIntake", "Slot %d=%s", intakeIndex, color);
+                    if (ballPresent) {
+                        Ball color = detectBallColor(); // still uses your sense window + distance selection
 
-                        autoIntakeNextSlotIndex = wrapSlot(intakeIndex + 1);
-                        autoRotateTimeMs = now + 100;
-                        autoIntakeState = AutoIntakeState.WAIT_FOR_ROTATE;
+                        if (color == Ball.GREEN || color == Ball.PURPLE) {
+                            if (pendingColor != color) {
+                                pendingColor = color;
+                                pendingColorSinceMs = now;
+                            } else if (now - pendingColorSinceMs >= COLOR_STABLE_MS) {
+                                // Commit
+                                slots[intakeIndex] = pendingColor;
+                                if (telemetry != null) telemetry.addData("AutoIntake", "Slot %d=%s", intakeIndex, pendingColor);
+
+                                // Schedule rotate
+                                autoIntakeNextSlotIndex = wrapSlot(intakeIndex + 1);
+                                autoRotateTimeMs = now + 100;
+                                autoIntakeState = AutoIntakeState.WAIT_FOR_ROTATE;
+
+                                // Reset pending
+                                pendingColor = Ball.EMPTY;
+                                pendingColorSinceMs = 0;
+                            }
+                        } else {
+                            // Present, but color not confidently classified this frame
+                            pendingColor = Ball.EMPTY;
+                            pendingColorSinceMs = 0;
+                        }
+                    } else {
+                        pendingColor = Ball.EMPTY;
+                        pendingColorSinceMs = 0;
                     }
                 }
                 break;
+
 
             case WAIT_FOR_ROTATE:
                 if (now >= autoRotateTimeMs && !ejecting && !isFull()) {
@@ -797,4 +822,82 @@ public class SpindexerSubsystem_State_new_Incremental {
         static Integer gameTag = null;
         static Integer patternStep = null;
     }
+
+    public void debugColorTelemetry(Telemetry telemetry, long nowMs) {
+        if (telemetry == null) return;
+
+        // --- Angles / sense window ---
+        double curAng = getCurrentAngleDeg();
+        double tgtAng = getTargetAngleDeg();
+        double diff = smallestAngleDiff(curAng, tgtAng);
+        boolean sense = inSenseWindow();
+
+        telemetry.addData("Spd/Sense", "win=%s cur=%.1f tgt=%.1f diff=%.1f",
+                sense, curAng, tgtAng, diff);
+
+        // --- Distances / presence ---
+        final double THRESH_CM = 5.0; // matches your code; change for testing
+        double d1 = intakeColor.getDistance(DistanceUnit.CM);
+        double d2 = intakeColor2.getDistance(DistanceUnit.CM);
+
+        boolean present1 = !Double.isNaN(d1) && d1 <= THRESH_CM;
+        boolean present2 = !Double.isNaN(d2) && d2 <= THRESH_CM;
+
+        telemetry.addData("Spd/Dist", "d1=%.1f(%s) d2=%.1f(%s) thr=%.1fcm",
+                d1, present1 ? "IN" : "OUT",
+                d2, present2 ? "IN" : "OUT",
+                THRESH_CM);
+
+        // --- Debounce state ---
+        boolean rawPresent = sense && (present1 || present2);
+        boolean debounced = debouncedBallPresent(rawPresent, nowMs);
+        telemetry.addData("Spd/Present", "raw=%s debounced=%s last=%s",
+                rawPresent, debounced, lastBallPresent);
+
+        // --- Per-sensor RGB + classification ---
+        // Sensor 1
+        int r1 = intakeColor.red();
+        int g1 = intakeColor.green();
+        int b1 = intakeColor.blue();
+        int sum1 = r1 + g1 + b1;
+
+        double rn1 = (sum1 > 0) ? (r1 / (double) sum1) : 0.0;
+        double gn1 = (sum1 > 0) ? (g1 / (double) sum1) : 0.0;
+        double bn1 = (sum1 > 0) ? (b1 / (double) sum1) : 0.0;
+
+        RawColor raw1 = classifyColor(intakeColor);
+
+        telemetry.addData("Spd/RGB1", "r=%d g=%d b=%d sum=%d | rn=%.2f gn=%.2f bn=%.2f | %s",
+                r1, g1, b1, sum1, rn1, gn1, bn1, raw1);
+
+        // Sensor 2
+        int r2 = intakeColor2.red();
+        int g2 = intakeColor2.green();
+        int b2 = intakeColor2.blue();
+        int sum2 = r2 + g2 + b2;
+
+        double rn2 = (sum2 > 0) ? (r2 / (double) sum2) : 0.0;
+        double gn2 = (sum2 > 0) ? (g2 / (double) sum2) : 0.0;
+        double bn2 = (sum2 > 0) ? (b2 / (double) sum2) : 0.0;
+
+        RawColor raw2 = classifyColor(intakeColor2);
+
+        telemetry.addData("Spd/RGB2", "r=%d g=%d b=%d sum=%d | rn=%.2f gn=%.2f bn=%.2f | %s",
+                r2, g2, b2, sum2, rn2, gn2, bn2, raw2);
+
+        // --- Which sensor chosen + final detected ball ---
+        RevColorSensorV3 chosen = null;
+        String chosenName = "NONE";
+
+        if (sense && (present1 || present2)) {
+            chosen = (present1 && present2)
+                    ? ((d1 <= d2) ? intakeColor : intakeColor2)
+                    : (present1 ? intakeColor : intakeColor2);
+            chosenName = (chosen == intakeColor) ? "S1" : "S2";
+        }
+
+        Ball detected = detectBallColor();
+        telemetry.addData("Spd/Chosen", "chosen=%s detected=%s", chosenName, detected);
+    }
+
 }

@@ -1,5 +1,6 @@
 package org.firstinspires.ftc.teamcode.subsystems;
 
+import com.bylazar.configurables.annotations.Configurable;
 import com.qualcomm.robotcore.hardware.DcMotor;
 import com.qualcomm.robotcore.hardware.DcMotorEx;
 import com.qualcomm.robotcore.hardware.DcMotorSimple;
@@ -9,6 +10,7 @@ import com.qualcomm.robotcore.util.Range;
 
 import org.firstinspires.ftc.teamcode.subsystems.util.PIDFController;
 
+@Configurable
 public class ShooterSubsystemFF {
 
     // ===== MOTOR CONSTANTS =====
@@ -19,8 +21,33 @@ public class ShooterSubsystemFF {
     private static final double MAX_TICKS_PER_SEC = PHYSICAL_MAX_RPM * TICKS_PER_REV / 60.0;
 
     // ===== HOOD SERVO CONSTANTS =====
-    private static final double HOOD_NEAR_POS = 0.92;
+    private static final double HOOD_NEAR_POS = 0.85;
     private static final double HOOD_FAR_POS  = 0.85;
+
+    // =========================
+    // PANELS TUNABLES (STATIC)
+    // =========================
+    // These show up in Panels Configurables (must be public static + non-final)
+
+    // RPM setpoints (human-friendly)
+    public static double TUNE_NEAR_RPM = 2600.0;
+    public static double TUNE_FAR_RPM  = 3200.0;
+
+    // Hood positions (optional to tune)
+    public static double TUNE_HOOD_NEAR_POS = HOOD_NEAR_POS;
+    public static double TUNE_HOOD_FAR_POS  = HOOD_FAR_POS;
+
+    // PID + FF tuned like your FlywheelTuning:
+    // FF = kV * targetVelocity(ticks/sec) + kS
+    public static double TUNE_kP = 0.012;
+    public static double TUNE_kI = 0.0;
+    public static double TUNE_kD = 0.0;
+    public static double TUNE_kV = 0.00042; // good first guess ~ 1/MAX_TICKS_PER_SEC
+    public static double TUNE_kS = 0.05;
+
+    public static boolean TUNE_FORCE_ON = false;
+    public static double  TUNE_FORCE_RPM = 3000.0; // any rpm you want while tuning
+
 
     // ===== HARDWARE =====
     private final DcMotorEx motor;
@@ -28,7 +55,7 @@ public class ShooterSubsystemFF {
     private final LightSubsystem light;
 
     // ===== CONTROLLER =====
-    private final org.firstinspires.ftc.teamcode.subsystems.util.PIDFController controller;
+    private final PIDFController controller;
 
     // ===== STATE =====
     private boolean isOn = false;
@@ -40,17 +67,16 @@ public class ShooterSubsystemFF {
     private boolean prevRpmUp   = false;
     private boolean prevRpmDown = false;
 
-    // ===== TUNABLES (what you’ll tune) =====
+    // ===== TUNABLES (INSTANCE COPIES; keep your original methods working) =====
     // Units:
-    //  - targetVel is ticks/sec
-    //  - kV is power per (ticks/sec)  (~ 1/MAX_TICKS_PER_SEC as a starting point)
-    //  - kS is static power offset (sign-applied)
-    //  - P/I are “power per ticks/sec error”
+    //  - controller error is ticks/sec (target - measured)
+    //  - kV is power per (ticks/sec)
+    //  - kS is static power offset
     private double kP = 0.00000;
     private double kI = 0.0;
     private double kD = 0.0;
-    private double kV = 0.0; // good first guess
-    private double kS = 0.00;                    // typical small-ish start
+    private double kV = 0.0;
+    private double kS = 0.00;
 
     // debug
     private double lastTargetTps = 0.0;
@@ -69,10 +95,42 @@ public class ShooterSubsystemFF {
         motor.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.FLOAT);
         motor.setDirection(DcMotorSimple.Direction.FORWARD);
 
+        // Initialize statics if you want an auto-guess for kV
+//        if (TUNE_kV == 0.0) {
+//            TUNE_kV = 1.0 / MAX_TICKS_PER_SEC;
+//        }
+
+        // Sync instance from Panels tunables once on init
+        syncFromTunables();
+
         controller = new PIDFController(kP, kI, kD, 0.0);
 
         fieldPos = 0;
-        hoodServo.setPosition(HOOD_NEAR_POS);
+        hoodServo.setPosition(TUNE_HOOD_NEAR_POS);
+    }
+
+    private void syncFromTunables() {
+        // pull Panels -> instance
+        nearRpm = TUNE_NEAR_RPM;
+        farRpm  = TUNE_FAR_RPM;
+
+        kP = TUNE_kP;
+        kI = TUNE_kI;
+        kD = TUNE_kD;
+        kV = TUNE_kV;
+        kS = TUNE_kS;
+    }
+
+    private void syncToTunables() {
+        // push instance -> Panels (note: Panels UI may not reflect until refresh, but code stays consistent)
+        TUNE_NEAR_RPM = nearRpm;
+        TUNE_FAR_RPM  = farRpm;
+
+        TUNE_kP = kP;
+        TUNE_kI = kI;
+        TUNE_kD = kD;
+        TUNE_kV = kV;
+        TUNE_kS = kS;
     }
 
     private static double ticksPerSecToRpm(double tps) {
@@ -88,32 +146,38 @@ public class ShooterSubsystemFF {
                        boolean rpmDownButton,
                        int fieldPosInput) {
 
+        // Always pull latest Panels values at start of loop
+        syncFromTunables();
+
         // === FIELD POS / HOOD ===
         int newFieldPos = (fieldPosInput == 1) ? 1 : 0;
         if (newFieldPos != fieldPos) {
             fieldPos = newFieldPos;
-            hoodServo.setPosition(fieldPos == 1 ? HOOD_FAR_POS : HOOD_NEAR_POS);
+            hoodServo.setPosition(fieldPos == 1 ? TUNE_HOOD_FAR_POS : TUNE_HOOD_NEAR_POS);
         }
 
         // === RPM ADJUST (edge) ===
         if (rpmUpButton && !prevRpmUp) {
             if (fieldPos == 1) farRpm = Math.min(PHYSICAL_MAX_RPM, farRpm + RPM_STEP);
             else               nearRpm = Math.min(PHYSICAL_MAX_RPM, nearRpm + RPM_STEP);
+            syncToTunables();
         }
         if (rpmDownButton && !prevRpmDown) {
             if (fieldPos == 1) farRpm = Math.max(0.0, farRpm - RPM_STEP);
             else               nearRpm = Math.max(0.0, nearRpm - RPM_STEP);
+            syncToTunables();
         }
         prevRpmUp = rpmUpButton;
         prevRpmDown = rpmDownButton;
 
         // === APPLY COMMAND ===
-        isOn = shooterOnCommand;
+        boolean on = shooterOnCommand || TUNE_FORCE_ON;
+        isOn = on;
 
-        double targetRpm = getTargetRpm();
+        double targetRpm = TUNE_FORCE_ON ? TUNE_FORCE_RPM : getTargetRpm();
         double targetTps = (isOn && targetRpm > 0) ? rpmToTicksPerSec(targetRpm) : 0.0;
 
-        double velTps = motor.getVelocity(); // still works in RUN_WITHOUT_ENCODER
+        double velTps = motor.getVelocity(); // ticks/sec even in RUN_WITHOUT_ENCODER
         double errorTps = targetTps - velTps;
 
         lastTargetTps = targetTps;
@@ -128,8 +192,9 @@ public class ShooterSubsystemFF {
             return;
         }
 
-        // Feedforward: kV*target + kS*sign(target)
-        double ff = kV * targetRpm + kS * Math.signum(targetTps);
+        // Feedforward (FlywheelTuning style):
+        // FF = kV * targetVelocity(ticks/sec) + kS
+        double ff = (kV * targetTps) + kS;
         lastFF = ff;
 
         // Push params into controller each loop (so tuning updates instantly)
@@ -142,7 +207,7 @@ public class ShooterSubsystemFF {
         motor.setPower(power);
         lastPowerCmd = power;
 
-        // Light logic based on RPM error (so it matches your intuition)
+        // Light logic based on RPM error
         double curRpm = ticksPerSecToRpm(velTps);
         double errRpm = getTargetRpm() - curRpm;
 
@@ -169,15 +234,20 @@ public class ShooterSubsystemFF {
     public double getKv() { return kV; }
     public double getKs() { return kS; }
 
-    public void adjustKp(double d) { kP = Math.max(0.0, kP + d); }
-    public void adjustKi(double d) { kI = Math.max(0.0, kI + d); }
-    public void adjustKd(double d) { kD = Math.max(0.0, kD + d); }
-    public void adjustKv(double d) { kV = Math.max(0.0, kV + d); }
-    public void adjustKs(double d) { kS = kS + d; } // allow negative if you want to simulate sag
+    public void adjustKp(double d) { kP = Math.max(0.0, kP + d); syncToTunables(); }
+    public void adjustKi(double d) { kI = Math.max(0.0, kI + d); syncToTunables(); }
+    public void adjustKd(double d) { kD = Math.max(0.0, kD + d); syncToTunables(); }
+    public void adjustKv(double d) { kV = Math.max(0.0, kV + d); syncToTunables(); }
+    public void adjustKs(double d) { kS = kS + d; syncToTunables(); } // allow negative for sag sim
 
     public void stop() {
         isOn = false;
         motor.setPower(0.0);
         light.setColor(1);
+    }
+
+    public double getCurrentRpmEstimate() {
+        double ticksPerSec = motor.getVelocity();
+        return ticksPerSecToRpm(ticksPerSec);
     }
 }
