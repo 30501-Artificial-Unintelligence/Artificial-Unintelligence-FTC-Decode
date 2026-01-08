@@ -61,8 +61,8 @@ public class SpindexerSubsystem_State_new_Incremental {
     private static final int TOLERANCE_TICKS = 10;
 
     // PID output limits
-    public static double MAX_POWER = 0.75;
-   public static  double MAX_POWER_EJECT = 0.75;
+    public static double MAX_POWER = 0.5;
+   public static  double MAX_POWER_EJECT = 0.5;
     public static long AUTO_ROTATE_DELAY_MS = 20;
 
     // If mag was full when started shooting

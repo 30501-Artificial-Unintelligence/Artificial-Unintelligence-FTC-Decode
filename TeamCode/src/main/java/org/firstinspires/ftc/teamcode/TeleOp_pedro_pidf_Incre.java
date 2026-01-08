@@ -85,7 +85,7 @@ public class TeleOp_pedro_pidf_Incre extends OpMode {
 
     // ===== SHOOT POSES (tune these numbers) =====
     public static Pose SHOOT_POSE_NEAR = new Pose(80, 80, Math.toRadians(45));
-    public static Pose SHOOT_POSE_FAR  = new Pose(84, 12, Math.toRadians(60));
+    public static Pose SHOOT_POSE_FAR  = new Pose(80.6, 17, Math.toRadians(90));
 
     // Aim offset applied to Limelight tx (deg). Tune in Panels.
 // fieldPos: 0 = near, 1 = far

@@ -32,26 +32,28 @@ public class RedAutoUp extends OpMode {
     // =========================
     // ===== POSES / PATHS =====
     // =========================
-    private final Pose startPose   = new Pose(108, 133.32, Math.toRadians(90));
+    private final Pose startPose   = new Pose(109.6, 132, Math.toRadians(90));
     private final Pose scorePose   = new Pose(80, 80, Math.toRadians(45));
 
-    private final Pose prePickup1Pose = new Pose(92, 83.5, Math.toRadians(0));
-    private final Pose pickup1Pose    = new Pose(130, 83.5, Math.toRadians(0));
+    private final Pose prePickup1Pose = new Pose(92, 82.1, Math.toRadians(0));
+    private final Pose pickup1Pose    = new Pose(122.9, 83.5, Math.toRadians(0));
 
-    private final Pose prePickup2Pose = new Pose(92, 59, Math.toRadians(0));
-    private final Pose pickup2Pose    = new Pose(135, 59, Math.toRadians(0));
+    private final Pose prePickup2Pose = new Pose(89.9, 58, Math.toRadians(0));
+    private final Pose pickup2Pose    = new Pose(129.4, 58, Math.toRadians(0));
 
-    private final Pose prePickup3Pose = new Pose(92, 35, Math.toRadians(0));
-    private final Pose pickup3Pose    = new Pose(130, 35, Math.toRadians(0));
+    private final Pose prePickup3Pose = new Pose(89.1, 34.7, Math.toRadians(0));
+    private final Pose pickup3Pose    = new Pose(126.5, 35, Math.toRadians(0));
+    private final Pose parkPose = new Pose(122.3, 69, Math.toRadians(90));
 
     private Path scorePreload;
     private PathChain goPrePickup1, creepToPickup1, scorePickup1;
     private PathChain goPrePickup2, creepToPickup2, scorePickup2;
     private PathChain goPrePickup3, creepToPickup3, scorePickup3;
+    private PathChain goParkFromScore;
 
     // Power in path
     public static double PWR_FAST  = 0.95;
-    public static double PWR_CREEP = 0.28;
+    public static double PWR_CREEP = 0.25;
 
     // =========================
     // ===== TURRET / AIM ======
@@ -210,6 +212,11 @@ public class RedAutoUp extends OpMode {
                 .addPath(new Path(new BezierLine(pickup3Pose, scorePose)))
                 .setLinearHeadingInterpolation(pickup3Pose.getHeading(), scorePose.getHeading())
                 .build();
+
+        goParkFromScore = follower.pathBuilder()
+                .addPath(new Path(new BezierLine(scorePose, parkPose)))
+                .setLinearHeadingInterpolation(scorePose.getHeading(), parkPose.getHeading())
+                .build();
     }
 
     // =========================
@@ -291,7 +298,7 @@ public class RedAutoUp extends OpMode {
             case 23:
                 if (!follower.isBusy()) {
                     startShootSequence();
-                    setPathState(102);
+                    setPathState(999);
                 }
                 break;
 
@@ -328,6 +335,13 @@ public class RedAutoUp extends OpMode {
 
             case 103:
                 if (updateShootSequence(fieldPos, autoPatternTag)) {
+                    setPathState(-1);
+                }
+                break;
+
+            case 999:
+                if (updateShootSequence(fieldPos, autoPatternTag)) {
+                    follower.followPath(goParkFromScore, PWR_FAST, false);
                     setPathState(-1);
                 }
                 break;

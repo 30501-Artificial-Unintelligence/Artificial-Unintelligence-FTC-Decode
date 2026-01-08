@@ -26,24 +26,25 @@ import org.firstinspires.ftc.teamcode.subsystems.VisionSubsystem;
 
 
 @Configurable
-@Autonomous(name = "RedAutoDown", group = "Auto")
-public class RedAutoDown extends OpMode {
+@Autonomous(name = "BlueAutoDown", group = "Auto")
+public class BlueAutoDown extends OpMode {
 
     // =========================
     // ===== POSES / PATHS =====
     // =========================
-    private final Pose startPose   = new Pose(80, 10.9, Math.toRadians(0));
-    private final Pose scorePose   = new Pose(84.5, 16.1, Math.toRadians(0));
+    private final Pose startPose   = new Pose(57.65, 9.29, Math.toRadians(180));
+    private final Pose scorePose   = new Pose(58.9, 18.8, Math.toRadians(180));
 
-    private final Pose prePickup1Pose = new Pose(89.1, 35, Math.toRadians(0));
-    private final Pose pickup1Pose    = new Pose(126.5, 35, Math.toRadians(0));
+    private final Pose prePickup1Pose = new Pose(52, 35, Math.toRadians(180));
+    private final Pose pickup1Pose    = new Pose(14, 35, Math.toRadians(180));
 
-    private final Pose prePickup2Pose = new Pose(114, 12, Math.toRadians(0));
-    private final Pose pickup2Pose    = new Pose(135, 12, Math.toRadians(0));
+    private final Pose prePickup2Pose = new Pose(30, 12, Math.toRadians(180));
+    private final Pose pickup2Pose    = new Pose(9, 12, Math.toRadians(180));
 
-    private final Pose prePickup3Pose = new Pose(92, 35, Math.toRadians(0));
-    private final Pose pickup3Pose    = new Pose(130, 35, Math.toRadians(0));
-    private final Pose parkPose = new Pose(99.2, 51.8, Math.toRadians(0));
+    private final Pose prePickup3Pose = new Pose(52, 35, Math.toRadians(180));
+    private final Pose pickup3Pose    = new Pose(14, 35, Math.toRadians(180));
+    private final Pose parkPose = new Pose(36, 50, Math.toRadians(180));
+
 
     private Path scorePreload;
     private PathChain goPrePickup1, creepToPickup1, scorePickup1;
@@ -64,14 +65,14 @@ public class RedAutoDown extends OpMode {
     public static double PATTERN_TAG_Y = 160.0;
 
     // If vision tracking is disabled, face this point (should be same as goal)
-    public static double ODO_FACE_X = 136.0;
+    public static double ODO_FACE_X = 8.0;
     public static double ODO_FACE_Y = 128.0;
 
     // Vision-based turret tracking toggle
     public static boolean VISION_TURRET_TRACKING_ENABLED = true; //if false, odo tracking
 
     // Which tag ID to track for aiming (goal tag)
-    public static int TRACK_TAG_ID = 24;
+    public static int TRACK_TAG_ID = 20;
 
     // TeleOp-like tracking behavior
     public static double TRACK_TX_DEADBAND_DEG = 0.4;   // tx deadband
@@ -131,10 +132,10 @@ public class RedAutoDown extends OpMode {
     // ===== Tunable aim offset (deg) added to tx =====
 // Use near/far if you ever switch fieldPos; right now fieldPos=1 (FAR)
     public static double AIM_OFFSET_NEAR_DEG = 0.0;
-    public static double AIM_OFFSET_FAR_DEG  = 4.0;
+    public static double AIM_OFFSET_FAR_DEG  = -4.0;
 
     // When vision tracking is enabled, turret will go here before tracking (instead of 0)
-    public static double VISION_HOME_ANGLE_DEG = -60.0;
+    public static double VISION_HOME_ANGLE_DEG = 60.0;
 
 
     // =========================

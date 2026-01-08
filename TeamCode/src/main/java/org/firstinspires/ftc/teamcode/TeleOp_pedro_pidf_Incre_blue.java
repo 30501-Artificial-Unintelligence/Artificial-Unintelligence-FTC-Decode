@@ -31,7 +31,7 @@ import org.firstinspires.ftc.teamcode.subsystems.VisionSubsystem;
 import java.util.function.Supplier;
 
 @Configurable
-@TeleOp(name = "TeleOp with pedro and pidf _ incremental", group = "Test")
+@TeleOp(name = "TeleOp with pedro and pidf _ blue incremental", group = "Test")
 public class TeleOp_pedro_pidf_Incre_blue extends OpMode {
 
     // ===== PEDRO FOLLOWER / DRIVE =====
@@ -84,8 +84,8 @@ public class TeleOp_pedro_pidf_Incre_blue extends OpMode {
     private boolean prevModeX = false;
 
     // ===== SHOOT POSES (tune these numbers) =====
-    public static Pose SHOOT_POSE_NEAR = new Pose(64, 80, Math.toRadians(-45));
-    public static Pose SHOOT_POSE_FAR  = new Pose(60, 12, Math.toRadians(-60));
+    public static Pose SHOOT_POSE_NEAR = new Pose(64, 80, Math.toRadians(135));
+    public static Pose SHOOT_POSE_FAR  = new Pose(57, 20.4, Math.toRadians(120));
 
     // Aim offset applied to Limelight tx (deg). Tune in Panels.
 // fieldPos: 0 = near, 1 = far
