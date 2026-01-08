@@ -5,7 +5,7 @@ import com.qualcomm.robotcore.hardware.Servo;
 
 public class LightSubsystem {
     private final Servo shooterLight;
-    private final double RED_COLOR = 0.277;
+    private final double RED_COLOR = 0.278;
     private final double GREEN_COLOR = 0.5;
     private final double YELLOW_COLOR = 0.388;
     private final double OFF = 0;

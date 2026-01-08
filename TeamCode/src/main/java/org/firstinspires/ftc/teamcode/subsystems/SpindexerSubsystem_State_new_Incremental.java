@@ -30,8 +30,8 @@ public class SpindexerSubsystem_State_new_Incremental {
     public static double kD = 0.0;
     public static double kF = 0.0;
 
-    // Optional: let Panels override the tag; 0/21/22/23 only (else ignored)
-    public static int patternTagOverride = 0;
+    // -1 = no override, else 0/21/22/23
+    public static int patternTagOverride = -1;
 
     // ==== BALL TYPES ====
     public enum Ball { EMPTY, GREEN, PURPLE, UNKNOWN }
@@ -61,8 +61,9 @@ public class SpindexerSubsystem_State_new_Incremental {
     private static final int TOLERANCE_TICKS = 10;
 
     // PID output limits
-    private static final double MAX_POWER = 0.5;
-    private static final double MAX_POWER_EJECT = 0.5;
+    public static double MAX_POWER = 0.75;
+   public static  double MAX_POWER_EJECT = 0.75;
+    public static long AUTO_ROTATE_DELAY_MS = 20;
 
     // If mag was full when started shooting
     private static final long WAIT_BEFORE_LOADER_FULL_MS    = 400;
@@ -79,6 +80,9 @@ public class SpindexerSubsystem_State_new_Incremental {
     private static final long ROTATE_TO_LOAD_TIMEOUT_MS = 2000;
     private static final long EJECT_TOTAL_TIMEOUT_MS    = 12000;
     private static final int ROTATE_MAX_RETRIES = 2;
+    // Intake gating: only trust slot-empty when we're near target
+    public static double INTAKE_EMPTY_ALIGN_TOL_DEG = 20.0;
+
 
     // ==== HARDWARE ====
     private final DcMotorEx motor;
@@ -125,7 +129,7 @@ public class SpindexerSubsystem_State_new_Incremental {
 
     private Ball pendingColor = Ball.EMPTY;
     private long pendingColorSinceMs = 0;
-    private static final long COLOR_STABLE_MS = 30; // try 50–120
+    private static final long COLOR_STABLE_MS = 10; // try 50–120
 
 
     // ==== PATTERN / TAG ====
@@ -473,7 +477,7 @@ public class SpindexerSubsystem_State_new_Incremental {
             if (telemetry != null) telemetry.addData("ForceIntake", "Slot %d forced GREEN", intakeIndex);
 
             autoIntakeNextSlotIndex = wrapSlot(intakeIndex + 1);
-            autoRotateTimeMs = System.currentTimeMillis() + 100;
+            autoRotateTimeMs = System.currentTimeMillis() + AUTO_ROTATE_DELAY_MS;
             autoIntakeState = AutoIntakeState.WAIT_FOR_ROTATE;
         } else {
             if (telemetry != null) telemetry.addData("ForceIntake", "Slot %d not empty", intakeIndex);
@@ -555,6 +559,22 @@ public class SpindexerSubsystem_State_new_Incremental {
         return selectFastestNonEmptySlot(currentAngle);
     }
 
+    /** Signed error (target - current) in degrees in [-180, 180]. */
+    public double getAngleErrorToTargetDeg() {
+        return smallestAngleDiff(targetAngleDeg, getCurrentAngleDeg());
+    }
+
+    /**
+     * True only if:
+     *  - spindexer is aligned to its commanded intake target (|error| <= tol)
+     *  - AND the slot at intake is EMPTY
+     */
+    public boolean isIntakeSlotEmptyAligned() {
+        return Math.abs(getAngleErrorToTargetDeg()) <= INTAKE_EMPTY_ALIGN_TOL_DEG
+                && slots[intakeIndex] == Ball.EMPTY
+                && !ejecting; // optional but recommended
+    }
+
     // =========================
     // ===== MAIN UPDATE =====
     // =========================
@@ -578,14 +598,20 @@ public class SpindexerSubsystem_State_new_Incremental {
         );
 
 
-        // Tag override priority: Panels override if valid, else code argument if valid
-        int effectiveTag = patternTagOverrideFromCode;
-        if (patternTagOverride == 0 || patternTagOverride == 21 || patternTagOverride == 22 || patternTagOverride == 23) {
-            effectiveTag = patternTagOverride;
-        }
-        if (effectiveTag == 0 || effectiveTag == 21 || effectiveTag == 22 || effectiveTag == 23) {
+        // Tag override priority: Panels override (if set), else code override (if set), else keep stored
+        int effectiveTag = -1;
+
+        boolean panelsValid = (patternTagOverride == 0 || patternTagOverride == 21 || patternTagOverride == 22 || patternTagOverride == 23);
+        boolean codeValid   = (patternTagOverrideFromCode == 0 || patternTagOverrideFromCode == 21 || patternTagOverrideFromCode == 22 || patternTagOverrideFromCode == 23);
+
+        if (panelsValid) effectiveTag = patternTagOverride;
+        else if (codeValid) effectiveTag = patternTagOverrideFromCode;
+
+        // Only overwrite stored gameTag if an override was provided
+        if (effectiveTag != -1) {
             gameTag = effectiveTag;
         }
+
 
         // Start eject on rising edge
         if (yEdge && !ejecting) {

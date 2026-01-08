@@ -71,7 +71,7 @@ public class TeleOp_pedro_pidf_Incre extends OpMode {
     private boolean lastEjecting = false;
 
     // driver2 pattern select
-    private int driverPatternTag = 0;
+    private int driverPatternTag = -1;
     private boolean prev2Up = false, prev2Right = false, prev2Left = false, prev2Down = false;
 
     // edges
@@ -85,7 +85,13 @@ public class TeleOp_pedro_pidf_Incre extends OpMode {
 
     // ===== SHOOT POSES (tune these numbers) =====
     public static Pose SHOOT_POSE_NEAR = new Pose(80, 80, Math.toRadians(45));
-    public static Pose SHOOT_POSE_FAR  = new Pose(84, 16, Math.toRadians(65));
+    public static Pose SHOOT_POSE_FAR  = new Pose(84, 12, Math.toRadians(60));
+
+    // Aim offset applied to Limelight tx (deg). Tune in Panels.
+// fieldPos: 0 = near, 1 = far
+    public static double AIM_OFFSET_NEAR_DEG = 0.0;
+    public static double AIM_OFFSET_FAR_DEG  = 4.0;
+
 
     // ===== SHOOT ASSIST STATE =====
     private boolean shootAssistActive = false;
@@ -174,6 +180,7 @@ public class TeleOp_pedro_pidf_Incre extends OpMode {
         follower.startTeleopDrive();
         shooterSpinDownDeadline = 0;
 
+        spindexer.homeToIntake();//different from homing load
         // Do NOT auto-home if you want Auto -> TeleOp continuity.
         // Just hold turret where it already is.
         turret.goToAngle(turret.getCurrentAngleDeg());
@@ -332,11 +339,23 @@ public class TeleOp_pedro_pidf_Incre extends OpMode {
             switch (turretAimMode) {
                 case VISION_TRACK: {
                     double tx = vision.getGoalTxDegOrNaN();
-                    if (!Double.isNaN(tx) && Math.abs(tx) > TX_DEADBAND_DEG) {
-                        double step = Range.clip(TX_SIGN * tx, -TX_MAX_STEP_DEG, TX_MAX_STEP_DEG);
-                        turret.goToAngle(turret.getCurrentAngleDeg() + step);
-                        turretPositionCommandActive = true;
+
+                    // pick offset based on fieldPos (your existing toggle)
+                    double offset = (fieldPos == 0) ? AIM_OFFSET_NEAR_DEG : AIM_OFFSET_FAR_DEG;
+
+                    if (!Double.isNaN(tx)) {
+                        double aimErrDeg = TX_SIGN * (tx + offset);
+
+                        if (Math.abs(aimErrDeg) > TX_DEADBAND_DEG) {
+                            double step = Range.clip(aimErrDeg, -TX_MAX_STEP_DEG, TX_MAX_STEP_DEG);
+                            turret.goToAngle(turret.getCurrentAngleDeg() + step);
+                            turretPositionCommandActive = true;
+                        } else {
+                            turret.goToAngle(turret.getCurrentAngleDeg());
+                            turretPositionCommandActive = true;
+                        }
                     } else {
+                        // no tag: hold position (or you could choose to re-home)
                         turret.goToAngle(turret.getCurrentAngleDeg());
                         turretPositionCommandActive = true;
                     }
@@ -513,6 +532,7 @@ public class TeleOp_pedro_pidf_Incre extends OpMode {
         telemetry.addData("Target RPM", "%.0f", target);
         telemetry.addData("Current RPM (est)", "%.0f", current);
         telemetry.addData("RPM Error", "%.0f", error);
+        telemetry.addData("spindexer gameTag", spindexer.getGameTag());
 
         telemetry.addData("Pattern Tag", driverPatternTag);
         telemetry.addData("Pattern", patternStringForTag(driverPatternTag));

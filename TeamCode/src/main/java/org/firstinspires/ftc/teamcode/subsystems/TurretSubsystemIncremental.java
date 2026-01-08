@@ -14,7 +14,7 @@ public class TurretSubsystemIncremental {
     // =========================
     // Motor / gear constants
     // =========================
-    private static final double TICKS_PER_MOTOR_REV = 383.6;
+    private static final double TICKS_PER_MOTOR_REV = 384.5;
     private static final double MOTOR_REV_PER_TURRET_REV = 290.0 / 60.0;
 
     private static final double TICKS_PER_TURRET_REV =
@@ -30,6 +30,8 @@ public class TurretSubsystemIncremental {
 
     // Small deadband so we don’t spam new targets when dx/dy are tiny
     private static final double FACE_TARGET_MIN_DIST_IN = 0.5;
+
+
 
     // =========================
     // Hardware
@@ -221,6 +223,18 @@ public class TurretSubsystemIncremental {
 
     public void faceTarget(double targetX, double targetY, Pose robotPose) {
         goToAngle(computeAngleToFaceTargetDeg(targetX, targetY, robotPose));
+    }
+
+    public void aimStepDeg(double errorDeg, double deadbandDeg, double maxStepDeg) {
+        if (Double.isNaN(errorDeg)) return;
+
+        if (Math.abs(errorDeg) < deadbandDeg) {
+            goToAngle(getCurrentAngleDeg()); // hold
+            return;
+        }
+
+        double step = Range.clip(errorDeg, -maxStepDeg, maxStepDeg);
+        goToAngle(getCurrentAngleDeg() + step);
     }
 
     // =========================

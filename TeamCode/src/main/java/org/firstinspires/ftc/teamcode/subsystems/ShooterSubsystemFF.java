@@ -21,8 +21,8 @@ public class ShooterSubsystemFF {
     private static final double MAX_TICKS_PER_SEC = PHYSICAL_MAX_RPM * TICKS_PER_REV / 60.0;
 
     // ===== HOOD SERVO CONSTANTS =====
-    private static final double HOOD_NEAR_POS = 0.85;
-    private static final double HOOD_FAR_POS  = 0.85;
+    private static final double HOOD_NEAR_POS = 0.92;
+    private static final double HOOD_FAR_POS  = 0.92;
 
     // =========================
     // PANELS TUNABLES (STATIC)
@@ -30,8 +30,8 @@ public class ShooterSubsystemFF {
     // These show up in Panels Configurables (must be public static + non-final)
 
     // RPM setpoints (human-friendly)
-    public static double TUNE_NEAR_RPM = 2600.0;
-    public static double TUNE_FAR_RPM  = 3200.0;
+    public static double TUNE_NEAR_RPM = 3100.0;
+    public static double TUNE_FAR_RPM  = 3100.0;
 
     // Hood positions (optional to tune)
     public static double TUNE_HOOD_NEAR_POS = HOOD_NEAR_POS;
@@ -39,7 +39,7 @@ public class ShooterSubsystemFF {
 
     // PID + FF tuned like your FlywheelTuning:
     // FF = kV * targetVelocity(ticks/sec) + kS
-    public static double TUNE_kP = 0.012;
+    public static double TUNE_kP = 0.0009;
     public static double TUNE_kI = 0.0;
     public static double TUNE_kD = 0.0;
     public static double TUNE_kV = 0.00042; // good first guess ~ 1/MAX_TICKS_PER_SEC
@@ -211,7 +211,7 @@ public class ShooterSubsystemFF {
         double curRpm = ticksPerSecToRpm(velTps);
         double errRpm = getTargetRpm() - curRpm;
 
-        if (Math.abs(errRpm) < 200) light.setColor(3);
+        if (Math.abs(errRpm) < 150) light.setColor(3);
         else light.setColor(2);
     }
 
