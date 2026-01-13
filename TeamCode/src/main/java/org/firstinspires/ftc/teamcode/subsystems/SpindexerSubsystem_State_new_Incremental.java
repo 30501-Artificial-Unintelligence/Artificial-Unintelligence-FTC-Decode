@@ -83,6 +83,12 @@ public class SpindexerSubsystem_State_new_Incremental {
     // Intake gating: only trust slot-empty when we're near target
     public static double INTAKE_EMPTY_ALIGN_TOL_DEG = 20.0;
 
+    // --- Color stability by frames (instead of ms) ---
+    private Ball lastColorFrame = Ball.EMPTY;
+    private int colorStableFrames = 0;
+    private static final int COLOR_STABLE_FRAMES = 2; // last + current loop same
+
+
 
     // ==== HARDWARE ====
     private final DcMotorEx motor;
@@ -650,42 +656,42 @@ public class SpindexerSubsystem_State_new_Incremental {
 
         switch (autoIntakeState) {
             case IDLE:
-                if (!isFull()
-                        && !ejecting
-                        && slots[intakeIndex] == Ball.EMPTY) {
+                if (ballPresent) {
+                    Ball color = detectBallColor(); // GREEN / PURPLE / EMPTY
 
-                    if (ballPresent) {
-                        Ball color = detectBallColor(); // still uses your sense window + distance selection
-
-                        if (color == Ball.GREEN || color == Ball.PURPLE) {
-                            if (pendingColor != color) {
-                                pendingColor = color;
-                                pendingColorSinceMs = now;
-                            } else if (now - pendingColorSinceMs >= COLOR_STABLE_MS) {
-                                // Commit
-                                slots[intakeIndex] = pendingColor;
-                                if (telemetry != null) telemetry.addData("AutoIntake", "Slot %d=%s", intakeIndex, pendingColor);
-
-                                // Schedule rotate
-                                autoIntakeNextSlotIndex = wrapSlot(intakeIndex + 1);
-                                autoRotateTimeMs = now + 100;
-                                autoIntakeState = AutoIntakeState.WAIT_FOR_ROTATE;
-
-                                // Reset pending
-                                pendingColor = Ball.EMPTY;
-                                pendingColorSinceMs = 0;
-                            }
+                    if (color == Ball.GREEN || color == Ball.PURPLE) {
+                        if (color == lastColorFrame) {
+                            colorStableFrames++;
                         } else {
-                            // Present, but color not confidently classified this frame
-                            pendingColor = Ball.EMPTY;
-                            pendingColorSinceMs = 0;
+                            lastColorFrame = color;
+                            colorStableFrames = 1;
+                        }
+
+                        if (colorStableFrames >= COLOR_STABLE_FRAMES) {
+                            // Commit
+                            slots[intakeIndex] = color;
+                            if (telemetry != null) telemetry.addData("AutoIntake", "Slot %d=%s", intakeIndex, color);
+
+                            // Schedule rotate
+                            autoIntakeNextSlotIndex = wrapSlot(intakeIndex + 1);
+                            autoRotateTimeMs = now + 100;
+                            autoIntakeState = AutoIntakeState.WAIT_FOR_ROTATE;
+
+                            // Reset so we don't double-commit
+                            lastColorFrame = Ball.EMPTY;
+                            colorStableFrames = 0;
                         }
                     } else {
-                        pendingColor = Ball.EMPTY;
-                        pendingColorSinceMs = 0;
+                        // Present, but not confidently classified this frame
+                        lastColorFrame = Ball.EMPTY;
+                        colorStableFrames = 0;
                     }
+                } else {
+                    // No ball
+                    lastColorFrame = Ball.EMPTY;
+                    colorStableFrames = 0;
                 }
-                break;
+
 
 
             case WAIT_FOR_ROTATE:
