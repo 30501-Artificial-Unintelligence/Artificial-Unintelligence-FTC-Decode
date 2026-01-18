@@ -61,14 +61,14 @@ public class SpindexerSubsystem_State_new_Incremental {
     private static final int TOLERANCE_TICKS = 10;
 
     // PID output limits
-    public static double MAX_POWER = 0.5;
+    public static double MAX_POWER = 0.6;
    public static  double MAX_POWER_EJECT = 0.5;
     public static long AUTO_ROTATE_DELAY_MS = 20;
 
     // If mag was full when started shooting
-    private static final long WAIT_BEFORE_LOADER_FULL_MS    = 400;
-    private static final long WAIT_BEFORE_LOADER_PARTIAL_MS = 2000;
-    private static final long WAIT_AFTER_LOADER_MS          = 300;
+    private static final long WAIT_BEFORE_LOADER_FULL_MS    = 200;
+    private static final long WAIT_BEFORE_LOADER_PARTIAL_MS = 200;
+    private static final long WAIT_AFTER_LOADER_MS          = 200;
 
     // Only trust intake sensors when near the commanded target angle
     private static final double SENSE_WINDOW_DEG = 30.0;
@@ -84,9 +84,9 @@ public class SpindexerSubsystem_State_new_Incremental {
     public static double INTAKE_EMPTY_ALIGN_TOL_DEG = 20.0;
 
     // --- Color stability by frames (instead of ms) ---
-    private Ball lastColorFrame = Ball.EMPTY;
-    private int colorStableFrames = 0;
-    private static final int COLOR_STABLE_FRAMES = 2; // last + current loop same
+    //private Ball lastColorFrame = Ball.EMPTY;
+    //private int colorStableFrames = 0;
+    //private static final int COLOR_STABLE_FRAMES = 2; // last + current loop same
 
 
 
@@ -136,6 +136,30 @@ public class SpindexerSubsystem_State_new_Incremental {
     private Ball pendingColor = Ball.EMPTY;
     private long pendingColorSinceMs = 0;
     private static final long COLOR_STABLE_MS = 10; // try 50–120
+
+
+    // --- Frame-based intake confirm (2 frames = valid) ---
+    private static final double INTAKE_PRESENT_THRESH_CM = 5.0; // pick ONE threshold and use it everywhere
+    private static final int PRESENT_STABLE_FRAMES = 1;
+    private static final int COLOR_STABLE_FRAMES = 2;
+
+    //private int presentFrames = 0;
+
+    //private Ball lastColorFrame = Ball.EMPTY;
+    private int colorStableFrames = 0;
+
+    //color and distance at same time ver
+    // ---- Frame-based combined presence+color gating ----
+    private int presentFrames = 0;            // consecutive frames distance says "present"
+    private Ball lastColorFrame = Ball.EMPTY; // last valid color frame
+    private int colorFrames = 0;              // consecutive frames same valid color
+
+    public static int PRESENT_FRAMES_REQUIRED = 2; // distance under threshold for N frames
+    public static int COLOR_FRAMES_REQUIRED   = 2; // same color for N frames
+
+    // Pick ONE threshold to use for BOTH presence + color sampling
+    public static double SENSE_THRESH_CM = 3.0; // choose 3.0 or 5.0, but keep it ONE value
+
 
 
     // ==== PATTERN / TAG ====
@@ -371,21 +395,21 @@ public class SpindexerSubsystem_State_new_Incremental {
         return present1 || present2;
     }
 
-    private boolean debouncedBallPresent(boolean rawPresent, long nowMs) {
-        if (!rawPresent) {
-            ballPresentSinceMs = 0;
-            ballPresentDebounced = false;
-            return false;
-        }
-
-        if (!ballPresentDebounced) {
-            if (ballPresentSinceMs == 0) ballPresentSinceMs = nowMs;
-            if (nowMs - ballPresentSinceMs >= BALL_PRESENT_DEBOUNCE_MS) {
-                ballPresentDebounced = true;
-            }
-        }
-        return ballPresentDebounced;
-    }
+//    private boolean debouncedBallPresent(boolean rawPresent, long nowMs) {
+//        if (!rawPresent) {
+//            ballPresentSinceMs = 0;
+//            ballPresentDebounced = false;
+//            return false;
+//        }
+//
+//        if (!ballPresentDebounced) {
+//            if (ballPresentSinceMs == 0) ballPresentSinceMs = nowMs;
+//            if (nowMs - ballPresentSinceMs >= BALL_PRESENT_DEBOUNCE_MS) {
+//                ballPresentDebounced = true;
+//            }
+//        }
+//        return ballPresentDebounced;
+//    }
 
     private RawColor classifyColor(RevColorSensorV3 sensor) {
         int r = sensor.red();
@@ -650,49 +674,83 @@ public class SpindexerSubsystem_State_new_Incremental {
             }
         }
 
-        // --- AUTO INTAKE ---
-        boolean rawPresent = inSenseWindow() && rawBallPresentDistance();
-        boolean ballPresent = debouncedBallPresent(rawPresent, now);
-
+        // --- AUTO INTAKE (distance + color sampled together, frame-based) ---
         switch (autoIntakeState) {
             case IDLE:
-                if (ballPresent) {
-                    Ball color = detectBallColor(); // GREEN / PURPLE / EMPTY
+                if (!isFull()
+                        && !ejecting
+                        && slots[intakeIndex] == Ball.EMPTY) {
 
-                    if (color == Ball.GREEN || color == Ball.PURPLE) {
-                        if (color == lastColorFrame) {
-                            colorStableFrames++;
+                    boolean sense = inSenseWindow();
+
+                    // Sample distances (same threshold used for BOTH presence + color)
+                    double d1 = intakeColor.getDistance(DistanceUnit.CM);
+                    double d2 = intakeColor2.getDistance(DistanceUnit.CM);
+
+                    boolean present1 = sense && !Double.isNaN(d1) && d1 <= SENSE_THRESH_CM;
+                    boolean present2 = sense && !Double.isNaN(d2) && d2 <= SENSE_THRESH_CM;
+
+                    boolean framePresent = present1 || present2;
+
+                    // Determine frame color only if present this frame
+                    Ball frameColor = Ball.EMPTY;
+                    if (framePresent) {
+                        RevColorSensorV3 chosen = (present1 && present2)
+                                ? ((d1 <= d2) ? intakeColor : intakeColor2)
+                                : (present1 ? intakeColor : intakeColor2);
+
+                        RawColor raw = classifyColor(chosen);
+                        if (raw == RawColor.GREEN) frameColor = Ball.GREEN;
+                        else if (raw == RawColor.PURPLE) frameColor = Ball.PURPLE;
+                        else frameColor = Ball.EMPTY; // RED/junk/unknown
+                    }
+
+                    // Update frame counters
+                    if (!framePresent) {
+                        presentFrames = 0;
+                        lastColorFrame = Ball.EMPTY;
+                        colorFrames = 0;
+                    } else {
+                        presentFrames++;
+
+                        if (frameColor == Ball.GREEN || frameColor == Ball.PURPLE) {
+                            if (frameColor == lastColorFrame) {
+                                colorFrames++;
+                            } else {
+                                lastColorFrame = frameColor;
+                                colorFrames = 1;
+                            }
                         } else {
-                            lastColorFrame = color;
-                            colorStableFrames = 1;
+                            // Present, but color not valid this frame => don't advance colorFrames
+                            lastColorFrame = Ball.EMPTY;
+                            colorFrames = 0;
                         }
 
-                        if (colorStableFrames >= COLOR_STABLE_FRAMES) {
-                            // Commit
-                            slots[intakeIndex] = color;
-                            if (telemetry != null) telemetry.addData("AutoIntake", "Slot %d=%s", intakeIndex, color);
+                        // Commit only when BOTH conditions are met over the same consecutive frames
+                        if (presentFrames >= PRESENT_FRAMES_REQUIRED
+                                && colorFrames >= COLOR_FRAMES_REQUIRED) {
 
-                            // Schedule rotate
+                            slots[intakeIndex] = lastColorFrame;
+                            if (telemetry != null)
+                                telemetry.addData("AutoIntake", "Slot %d=%s", intakeIndex, lastColorFrame);
+
                             autoIntakeNextSlotIndex = wrapSlot(intakeIndex + 1);
                             autoRotateTimeMs = now + 100;
                             autoIntakeState = AutoIntakeState.WAIT_FOR_ROTATE;
 
                             // Reset so we don't double-commit
+                            presentFrames = 0;
                             lastColorFrame = Ball.EMPTY;
-                            colorStableFrames = 0;
+                            colorFrames = 0;
                         }
-                    } else {
-                        // Present, but not confidently classified this frame
-                        lastColorFrame = Ball.EMPTY;
-                        colorStableFrames = 0;
                     }
                 } else {
-                    // No ball
+                    // Not eligible to intake => reset
+                    presentFrames = 0;
                     lastColorFrame = Ball.EMPTY;
-                    colorStableFrames = 0;
+                    colorFrames = 0;
                 }
-
-
+                break;
 
             case WAIT_FOR_ROTATE:
                 if (now >= autoRotateTimeMs && !ejecting && !isFull()) {
@@ -705,11 +763,18 @@ public class SpindexerSubsystem_State_new_Incremental {
                 if (isSlotAtIntakePosition(autoIntakeNextSlotIndex)) {
                     intakeIndex = autoIntakeNextSlotIndex;
                     autoIntakeState = AutoIntakeState.IDLE;
+
+                    // Reset on re-entering IDLE at new slot
+                    presentFrames = 0;
+                    lastColorFrame = Ball.EMPTY;
+                    colorFrames = 0;
                 }
                 break;
         }
 
-        lastBallPresent = ballPresent;
+
+
+        //lastBallPresent = ballPresent;
 
         // --- EJECT STATE MACHINE ---
         if (ejecting) {
@@ -888,10 +953,10 @@ public class SpindexerSubsystem_State_new_Incremental {
                 THRESH_CM);
 
         // --- Debounce state ---
-        boolean rawPresent = sense && (present1 || present2);
-        boolean debounced = debouncedBallPresent(rawPresent, nowMs);
-        telemetry.addData("Spd/Present", "raw=%s debounced=%s last=%s",
-                rawPresent, debounced, lastBallPresent);
+//        boolean rawPresent = sense && (present1 || present2);
+//        boolean debounced = debouncedBallPresent(rawPresent, nowMs);
+//        telemetry.addData("Spd/Present", "raw=%s debounced=%s last=%s",
+//                rawPresent, debounced, lastBallPresent);
 
         // --- Per-sensor RGB + classification ---
         // Sensor 1

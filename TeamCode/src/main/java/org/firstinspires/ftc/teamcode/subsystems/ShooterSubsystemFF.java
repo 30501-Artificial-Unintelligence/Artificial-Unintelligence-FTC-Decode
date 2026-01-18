@@ -30,7 +30,7 @@ public class ShooterSubsystemFF {
     // These show up in Panels Configurables (must be public static + non-final)
 
     // RPM setpoints (human-friendly)
-    public static double TUNE_NEAR_RPM = 2950.0;
+    public static double TUNE_NEAR_RPM = 2900.0;
     public static double TUNE_FAR_RPM  = 3100.0;
 
     // Hood positions (optional to tune)
@@ -39,7 +39,7 @@ public class ShooterSubsystemFF {
 
     // PID + FF tuned like your FlywheelTuning:
     // FF = kV * targetVelocity(ticks/sec) + kS
-    public static double TUNE_kP = 0.0011;
+    public static double TUNE_kP = 0.01;
     public static double TUNE_kI = 0.0;
     public static double TUNE_kD = 0.0;
     public static double TUNE_kV = 0.00042; // good first guess ~ 1/MAX_TICKS_PER_SEC
