@@ -1,0 +1,923 @@
+package org.firstinspires.ftc.teamcode.subsystems;
+
+import com.qualcomm.hardware.rev.RevColorSensorV3;
+import com.qualcomm.robotcore.hardware.DcMotor;
+import com.qualcomm.robotcore.hardware.DcMotorEx;
+import com.qualcomm.robotcore.hardware.DigitalChannel;
+import com.qualcomm.robotcore.hardware.HardwareMap;
+import com.qualcomm.robotcore.util.Range;
+
+import org.firstinspires.ftc.robotcore.external.Telemetry;
+import org.firstinspires.ftc.robotcore.external.navigation.DistanceUnit;
+
+/**
+ * PASSIVE Spindexer (frame-mounted sensors, trust only when aligned at intake).
+ *
+ * Your physical rules:
+ * - Degrees increase clockwise (CW).
+ * - CCW = EJECT direction.
+ * - CW = SAFE direction (won't eject).
+ *
+ * Mechanism note:
+ * - You park "past" preshoot (staging) via SAFE CW, then come back to preshoot via CCW
+ *   so the rod can dangle down before the 720° CCW shoot.
+ *
+ * Compatibility:
+ * - Keeps update(...) signature and common getters used by old TeleOps/Autos.
+ * - Keeps slots[] array (0/1/2) representing POCKETS in the wheel frame (slot0 at intake when angle=0).
+ */
+@com.bylazar.configurables.annotations.Configurable
+public class SpindexerSubsystem_Passive_State_new_Incremental {
+
+    // =========================
+    // ===== CONFIG / TUNABLES ==
+    // =========================
+
+    /** Flip this if direction is wrong (one switch, as requested). */
+    public static boolean REVERSE_MOTOR = false;
+
+    // Motor encoder
+    private static final double TICKS_PER_REV = 384.5; // goBILDA 435rpm YJ integrated encoder
+    private static final double DEG_PER_TICK = 360.0 / TICKS_PER_REV;
+
+    // Geometry (wheel-frame pockets)
+    private static final int SLOT_COUNT = 3;
+    private static final double DEGREES_PER_SLOT = 120.0;
+
+    // World angles (by your convention)
+    public static double INTAKE_ANGLE_DEG   = 0.0;   // slot0 at intake when wheel angle = 0
+    public static double PRESHOOT_ANGLE_DEG = 180.0; // preshoot
+    /** "Staging" is defined as PRESHOOT + GO_PAST (CW safe). Example: GO_PAST=60 -> 240 staging. */
+    public static double GO_PAST_ANGLE_DEG  = 60.0;  // tune this
+
+
+    // Trust sensors only when aligned to intake within this many degrees
+    public static double ALIGN_TOL_DEG = 10.0;
+
+    // Slot0 (Rev) presence threshold
+    public static double SLOT0_DIST_THRESH_CM = 3.0;
+
+    // Frame-based sensing (presence+color together)
+    public static int PRESENT_FRAMES_REQUIRED = 2;
+    public static int COLOR_FRAMES_REQUIRED   = 2;
+
+    // Movement control (direction-constrained)
+    public static double MOVE_kP = 0.012;        // power per deg during positioning/return
+    public static double MOVE_MAX_POWER = 0.55;  // max power during positioning/return
+    public static double MOVE_DONE_TOL_DEG = 2.0;
+
+    // Hold control (shortest-path) when READY/IDLE
+    public static double HOLD_kP = 0.010;
+    public static double HOLD_MAX_POWER = 0.30;
+
+    // Shooting (open-loop, encoder-distance tracked)
+    public static double SHOOT_DEG = 720.0;        // 2 revs
+    public static double SHOOT_POWER_HIGH = 1.0;   // first segment
+    public static double SHOOT_POWER_LOW  = 0.9;   // remainder
+    public static long   SHOOT_HIGH_MS    = 300;   // high power time
+    public static long   SHOOT_TIMEOUT_MS = 4500;  // safety
+
+    // Pattern override (same idea as your old code)
+    // -1 means no override; else 0/21/22/23
+    public static int patternTagOverride = -1;
+
+    // =========================
+    // ===== HARDWARE NAMES =====
+    // =========================
+    // Change these to match your robot configuration names.
+    public static String SLOT1_PRESENT_NAME = "slot1Present";
+    public static String SLOT1_GREEN_NAME   = "slot1Green";
+    public static String SLOT2_PRESENT_NAME = "slot2Present";
+    public static String SLOT2_GREEN_NAME   = "slot2Green";
+
+    // =========================
+    // ===== SLOT MODEL =========
+    // =========================
+    public enum Ball { EMPTY, GREEN, PURPLE, UNKNOWN }
+
+    private enum RawColor { RED, GREEN, PURPLE }
+
+    // Provided by you (CCW eject order):
+    // start slot0 => 0,2,1
+    // start slot1 => 1,0,2
+    // start slot2 => 2,1,0
+    private static final int[][] EJECT_ORDER = new int[][]{
+            {0, 2, 1}, // start 0
+            {1, 0, 2}, // start 1
+            {2, 1, 0}  // start 2
+    };
+
+    // =========================
+    // ===== STATE MACHINE ======
+    // =========================
+    private enum State {
+        IDLE,
+        POSITION_TO_PARK_CW,
+        POSITION_TO_PRESHOOT_CCW,
+        READY,
+        SHOOTING,
+        RETURNING_CW
+    }
+
+    private State state = State.IDLE;
+
+    // =========================
+    // ===== HARDWARE ===========
+    // =========================
+    private final DcMotorEx motor;
+    private final RevColorSensorV3 slot0Color1;
+    private final RevColorSensorV3 slot0Color2;
+
+    private final DigitalChannel slot1Present;
+    private final DigitalChannel slot1Green;
+    private final DigitalChannel slot2Present;
+    private final DigitalChannel slot2Green;
+
+    // =========================
+    // ===== ANGLE / ZERO =======
+    // =========================
+    private int zeroTicks = 0;          // raw motor ticks corresponding to wheel angle = 0 (slot0 at intake)
+
+    private double targetAngleDeg = 0.0;
+
+    // Persist across opmodes in same RC session
+    static class SpindexerOpModeStorage {
+        static Integer zeroTicks = null;
+        static Double  targetAngleDeg = null;
+        static Integer gameTag = null;
+        static int[]   slotsEnc = null;
+        static Boolean reverseMotor = null; // detect flipping between runs
+    }
+
+    // =========================
+    // ===== SLOT STATE =========
+    // =========================
+    private final Ball[] slots = new Ball[SLOT_COUNT];
+
+    // Frame-based counters for slot0
+    private int slot0PresentFrames = 0;
+    private int slot0ColorFrames = 0;
+    private Ball slot0LastColorFrame = Ball.EMPTY;
+
+    // Frame-based counters for slot1/2
+    private final int[] presentFrames = new int[SLOT_COUNT];
+    private final int[] colorFrames = new int[SLOT_COUNT];
+    private final Ball[] lastColorFrame = new Ball[SLOT_COUNT];
+
+    // Reread rule for slot0 when slot1/2 gets newly filled
+    private boolean slot0NeedsReread = false;
+
+    // Tag/pattern
+    private int gameTag = 0;
+
+    // Position plan
+    private int selectedStartSlot = 0;
+    private double parkWheelAngleDeg = 0.0;
+    private double preshootWheelAngleDeg = 0.0;
+
+    // Shoot request latch (if button pressed early)
+    private boolean shootRequested = false;
+
+    // Shooting tracking
+    private boolean ejecting = false;
+    private long shootStartMs = 0;
+    private long shootLastMs = 0;
+    private int shootLastTicks = 0;
+    private double shootMovedDeg = 0.0;
+
+    // =========================
+    // ===== CONSTRUCTOR ========
+    // =========================
+    public SpindexerSubsystem_Passive_State_new_Incremental(HardwareMap hardwareMap) {
+        motor = hardwareMap.get(DcMotorEx.class, "spindexerMotor");
+        motor.setMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
+        motor.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
+
+        slot0Color1 = hardwareMap.get(RevColorSensorV3.class, "spindexerIntakeColorSensor1");
+        slot0Color2 = hardwareMap.get(RevColorSensorV3.class, "spindexerIntakeColorSensor2");
+
+        slot1Present = hardwareMap.get(DigitalChannel.class, SLOT1_PRESENT_NAME);
+        slot1Green   = hardwareMap.get(DigitalChannel.class, SLOT1_GREEN_NAME);
+        slot2Present = hardwareMap.get(DigitalChannel.class, SLOT2_PRESENT_NAME);
+        slot2Green   = hardwareMap.get(DigitalChannel.class, SLOT2_GREEN_NAME);
+
+        slot1Present.setMode(DigitalChannel.Mode.INPUT);
+        slot1Green.setMode(DigitalChannel.Mode.INPUT);
+        slot2Present.setMode(DigitalChannel.Mode.INPUT);
+        slot2Green.setMode(DigitalChannel.Mode.INPUT);
+
+        for (int i = 0; i < SLOT_COUNT; i++) {
+            slots[i] = Ball.EMPTY;
+            presentFrames[i] = 0;
+            colorFrames[i] = 0;
+            lastColorFrame[i] = Ball.EMPTY;
+        }
+
+        restoreFromStorageOrDefaultToIntake();
+
+        // Hold where we are on boot
+        targetAngleDeg = getCurrentAngleDeg();
+        state = State.IDLE;
+        ejecting = false;
+    }
+
+    private void restoreFromStorageOrDefaultToIntake() {
+        if (SpindexerOpModeStorage.zeroTicks != null) {
+            zeroTicks = SpindexerOpModeStorage.zeroTicks;
+            if (SpindexerOpModeStorage.targetAngleDeg != null) targetAngleDeg = SpindexerOpModeStorage.targetAngleDeg;
+            if (SpindexerOpModeStorage.gameTag != null) gameTag = SpindexerOpModeStorage.gameTag;
+
+            if (SpindexerOpModeStorage.slotsEnc != null && SpindexerOpModeStorage.slotsEnc.length == SLOT_COUNT) {
+                for (int i = 0; i < SLOT_COUNT; i++) slots[i] = decodeSlot(SpindexerOpModeStorage.slotsEnc[i]);
+            }
+        } else {
+            // First run: assume current wheel position is INTAKE (slot0 at intake now)
+            homeSlot0AtIntakeHere();
+        }
+
+        // If user flips REVERSE_MOTOR between runs, stored zero becomes ambiguous.
+        // Best practice: re-home after flipping.
+        if (SpindexerOpModeStorage.reverseMotor != null && SpindexerOpModeStorage.reverseMotor != REVERSE_MOTOR) {
+            // Soft warning behavior: treat current position as intake and re-zero
+            homeSlot0AtIntakeHere();
+        }
+    }
+
+    private void persistToStorage() {
+        SpindexerOpModeStorage.zeroTicks = zeroTicks;
+        SpindexerOpModeStorage.targetAngleDeg = targetAngleDeg;
+        SpindexerOpModeStorage.gameTag = gameTag;
+        SpindexerOpModeStorage.reverseMotor = REVERSE_MOTOR;
+
+        int[] enc = new int[SLOT_COUNT];
+        for (int i = 0; i < SLOT_COUNT; i++) enc[i] = encodeSlot(slots[i]);
+        SpindexerOpModeStorage.slotsEnc = enc;
+    }
+
+    private int encodeSlot(Ball b) {
+        if (b == Ball.GREEN) return 1;
+        if (b == Ball.PURPLE) return 2;
+        if (b == Ball.UNKNOWN) return 3;
+        return 0;
+    }
+
+    private Ball decodeSlot(int v) {
+        if (v == 1) return Ball.GREEN;
+        if (v == 2) return Ball.PURPLE;
+        if (v == 3) return Ball.UNKNOWN;
+        return Ball.EMPTY;
+    }
+
+    // =========================
+    // ===== PUBLIC API (compat)
+    // =========================
+    public Ball[] getSlots() { return slots; }
+
+    public boolean hasAnyBall() {
+        for (Ball b : slots) if (b != Ball.EMPTY) return true;
+        return false;
+    }
+
+    public boolean isFull() {
+        for (Ball b : slots) if (b == Ball.EMPTY) return false;
+        return true;
+    }
+
+    public boolean isEjecting() { return ejecting; }
+
+    public int getGameTag() { return gameTag; }
+
+    public void setGameTag(int tag) { this.gameTag = tag; }
+
+    public String getGamePattern() {
+        Ball[] p = getPatternForTag(gameTag);
+        if (p == null) return "Fast (no pattern, tag=" + gameTag + ")";
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < p.length; i++) {
+            if (i > 0) sb.append("-");
+            sb.append(p[i] == Ball.PURPLE ? "P" : (p[i] == Ball.GREEN ? "G" : "?"));
+        }
+        return sb.toString();
+    }
+
+    /** Same name as before; now it simply commands RETURN to intake (0°). */
+    public void homeToIntake() {
+        shootRequested = false;
+        ejecting = false;
+        state = State.RETURNING_CW;
+        targetAngleDeg = normalizeAngle(INTAKE_ANGLE_DEG);
+    }
+
+    /** Hard re-zero: declare current position is intake (slot0 at intake). */
+    public void homeSlot0AtIntakeHere() {
+        zeroTicks = motor.getCurrentPosition();
+        targetAngleDeg = normalizeAngle(INTAKE_ANGLE_DEG);
+        state = State.IDLE;
+
+        // Reset sensing counters
+        clearAllSensingCounters();
+        slot0NeedsReread = true;
+
+        persistToStorage();
+    }
+
+    /** Optional: keep this method for compatibility; it just goes to preshoot hold. */
+    public void homeSlot0AtLoadHere() {
+        // "Load" in old code was 180; here treat as preshoot hold.
+        targetAngleDeg = normalizeAngle(PRESHOOT_ANGLE_DEG);
+        state = State.IDLE;
+        persistToStorage();
+    }
+
+    public int getEncoder() { return motor.getCurrentPosition(); }
+
+    public double getTargetAngleDeg() { return targetAngleDeg; }
+
+    public int getTarget() { return angleToTicks(targetAngleDeg); }
+
+    public double getCurrentAngleDeg() {
+        return ticksToAngle(motor.getCurrentPosition());
+    }
+
+    /** Signed smallest-path error (target - current) in degrees in [-180,180]. */
+    public double getAngleErrorToTargetDeg() {
+        return smallestAngleDiff(targetAngleDeg, getCurrentAngleDeg());
+    }
+
+    /** For old TeleOps that call these (safe no-ops / compatibility). */
+    public boolean isAutoRotating() { return state == State.POSITION_TO_PARK_CW || state == State.POSITION_TO_PRESHOOT_CCW || state == State.RETURNING_CW; }
+    public int getIntakeIndex() { return 0; } // pocket index at intake when aligned (wheel frame)
+
+    public void presetSlots(Ball s0, Ball s1, Ball s2) {
+        slots[0] = (s0 == null) ? Ball.EMPTY : s0;
+        slots[1] = (s1 == null) ? Ball.EMPTY : s1;
+        slots[2] = (s2 == null) ? Ball.EMPTY : s2;
+        persistToStorage();
+    }
+
+    public void forceIntakeSlotGreen(Telemetry telemetry) {
+        if (slots[0] == Ball.EMPTY) slots[0] = Ball.GREEN;
+        if (telemetry != null) telemetry.addData("Force", "slot0=GREEN");
+    }
+
+    public void forceIntakeSlotPurple(Telemetry telemetry) {
+        if (slots[0] == Ball.EMPTY) slots[0] = Ball.PURPLE;
+        if (telemetry != null) telemetry.addData("Force", "slot0=PURPLE");
+    }
+
+    public void debugAbsAngle(Telemetry telemetry) {
+        if (telemetry == null) return;
+        telemetry.addData("Spd/ABS", "disabled (incremental)");
+        telemetry.addData("Spd/zeroTicks", zeroTicks);
+        telemetry.addData("Spd/reverse", REVERSE_MOTOR);
+    }
+
+    // =========================
+    // ===== MAIN UPDATE =========
+    // =========================
+    /**
+     * Call every loop.
+     *
+     * @param telemetry DS telemetry
+     * @param loader (unused for passive mode for now; kept for compatibility)
+     * @param yEdge shoot command edge
+     * @param patternTagOverrideFromCode code override 0/21/22/23 or -1
+     * @return true if mag full after update
+     */
+    public boolean update(Telemetry telemetry,
+                          LoaderSubsystem loader,
+                          boolean yEdge,
+                          int patternTagOverrideFromCode) {
+
+        long nowMs = System.currentTimeMillis();
+
+        // Latch shoot request (only fires when READY)
+        if (yEdge) shootRequested = true;
+
+        // Apply tag overrides (same priority pattern)
+        int effectiveTag = -1;
+        boolean panelsValid = (patternTagOverride == 0 || patternTagOverride == 21 || patternTagOverride == 22 || patternTagOverride == 23);
+        boolean codeValid   = (patternTagOverrideFromCode == 0 || patternTagOverrideFromCode == 21 || patternTagOverrideFromCode == 22 || patternTagOverrideFromCode == 23);
+
+        if (panelsValid) effectiveTag = patternTagOverride;
+        else if (codeValid) effectiveTag = patternTagOverrideFromCode;
+        if (effectiveTag != -1) gameTag = effectiveTag;
+
+        // Update sensing ONLY when aligned at intake and NOT shooting
+        boolean aligned = isAlignedAtIntake();
+        if (aligned && state != State.SHOOTING) {
+            updateSensorsAligned(telemetry);
+        }
+
+        // If we become full in IDLE, immediately start positioning to preshoot (but do not shoot)
+        if (state == State.IDLE && isFull()) {
+            planToPreshootFromCurrent();
+            state = State.POSITION_TO_PARK_CW;
+        }
+
+        // If user requests shoot while not ready, allow partial mags:
+        if ((state == State.IDLE) && shootRequested && hasAnyBall() && !isFull()) {
+            planToPreshootFromCurrent();
+            state = State.POSITION_TO_PARK_CW;
+        }
+
+        // State machine
+        switch (state) {
+            case IDLE: {
+                ejecting = false;
+                // Hold position softly
+                holdToTargetShortestPath();
+                break;
+            }
+
+            case POSITION_TO_PARK_CW: {
+                ejecting = false;
+                boolean done = moveTowardTargetCW(parkWheelAngleDeg);
+                if (done) {
+                    state = State.POSITION_TO_PRESHOOT_CCW;
+                }
+                break;
+            }
+
+            case POSITION_TO_PRESHOOT_CCW: {
+                ejecting = false;
+                boolean done = moveTowardTargetCCW(preshootWheelAngleDeg);
+                if (done) {
+                    state = State.READY;
+                }
+                break;
+            }
+
+            case READY: {
+                ejecting = false;
+                // Hold at preshoot
+                holdToTargetShortestPath();
+
+                if (shootRequested) {
+                    // Start shooting now
+                    beginShooting(nowMs);
+                    state = State.SHOOTING;
+                }
+                break;
+            }
+
+            case SHOOTING: {
+                ejecting = true;
+                boolean done = updateShooting(nowMs);
+                if (done) {
+                    // Clear all slots after passive 720° shoot (your rule)
+                    slots[0] = Ball.EMPTY;
+                    slots[1] = Ball.EMPTY;
+                    slots[2] = Ball.EMPTY;
+
+                    // After shoot, go back to intake (SAFE CW)
+                    state = State.RETURNING_CW;
+                    targetAngleDeg = normalizeAngle(INTAKE_ANGLE_DEG);
+
+                    // Reset sensing so next fills are re-detected
+                    clearAllSensingCounters();
+                    slot0NeedsReread = true;
+                }
+                break;
+            }
+
+            case RETURNING_CW: {
+                ejecting = false;
+                boolean done = moveTowardTargetCW(normalizeAngle(INTAKE_ANGLE_DEG));
+                if (done) {
+                    state = State.IDLE;
+                }
+                break;
+            }
+        }
+
+        persistToStorage();
+
+        // Optional debug telemetry
+        if (telemetry != null) {
+            telemetry.addData("Spd/state", state);
+            telemetry.addData("Spd/aligned", aligned);
+            telemetry.addData("Spd/angle", "%.1f", getCurrentAngleDeg());
+            telemetry.addData("Spd/target", "%.1f", targetAngleDeg);
+            telemetry.addData("Spd/tag", gameTag);
+            telemetry.addData("Spd/slots", "%s %s %s", slots[0], slots[1], slots[2]);
+            telemetry.addData("Spd/startSlot", selectedStartSlot);
+            telemetry.addData("Spd/shootReq", shootRequested);
+        }
+
+        return isFull();
+    }
+
+    // =========================
+    // ===== PLANNING ===========
+    // =========================
+    private void planToPreshootFromCurrent() {
+        selectedStartSlot = chooseStartSlotForCurrentTag();
+
+        // Effective park angle in world (additional goPast)
+        double parkWorld = normalizeAngle(PRESHOOT_ANGLE_DEG + GO_PAST_ANGLE_DEG);
+
+
+        // Convert world angles into wheel angle targets for the chosen POCKET
+        parkWheelAngleDeg     = wheelAngleForPocketAtWorldAngle(selectedStartSlot, parkWorld);
+        preshootWheelAngleDeg = wheelAngleForPocketAtWorldAngle(selectedStartSlot, PRESHOOT_ANGLE_DEG);
+
+        // Start movement from current state
+        shootRequested = shootRequested; // keep latched if pressed early
+    }
+
+    private int chooseStartSlotForCurrentTag() {
+        // Candidates: any non-empty slot (if none, default 0)
+        int[] candidates = new int[]{0, 1, 2};
+
+        // Tag 0: fastest / closest by SAFE CW to park
+        Ball[] desired = getPatternForTag(gameTag);
+
+        double cur = getCurrentAngleDeg();
+        double parkWorld = normalizeAngle(PRESHOOT_ANGLE_DEG + GO_PAST_ANGLE_DEG);
+
+        int bestSlot = 0;
+        int bestScore = -1;
+        double bestCw = Double.MAX_VALUE;
+
+        for (int s : candidates) {
+            if (slots[s] == Ball.EMPTY) continue; // can't start from empty pocket
+
+            int score = 0;
+            if (desired != null) {
+                int[] order = EJECT_ORDER[s];
+                score += matchScore(desired, order);
+            }
+
+            // tie-breaker: minimal CW travel to park
+            double parkWheel = wheelAngleForPocketAtWorldAngle(s, parkWorld);
+            double cw = cwDeltaDeg(cur, parkWheel);
+
+            if (score > bestScore || (score == bestScore && cw < bestCw)) {
+                bestScore = score;
+                bestCw = cw;
+                bestSlot = s;
+            }
+        }
+
+        // If tag is 0 or nothing matched, bestScore may stay -1. Fallback: choose closest non-empty.
+        if (bestScore < 0) {
+            bestSlot = 0;
+            bestCw = Double.MAX_VALUE;
+            for (int s : candidates) {
+                if (slots[s] == Ball.EMPTY) continue;
+                double parkWheel = wheelAngleForPocketAtWorldAngle(s, parkWorld);
+                double cw = cwDeltaDeg(cur, parkWheel);
+                if (cw < bestCw) { bestCw = cw; bestSlot = s; }
+            }
+        }
+
+        return bestSlot;
+    }
+
+    private int matchScore(Ball[] desired, int[] order) {
+        // Weighted match score: first shot matters most
+        int score = 0;
+        Ball a0 = slots[order[0]];
+        Ball a1 = slots[order[1]];
+        Ball a2 = slots[order[2]];
+
+        if (a0 != Ball.EMPTY && desired[0] == a0) score += 4;
+        if (a1 != Ball.EMPTY && desired[1] == a1) score += 2;
+        if (a2 != Ball.EMPTY && desired[2] == a2) score += 1;
+
+        return score;
+    }
+
+    private Ball[] getPatternForTag(int tag) {
+        // 23 = P,P,G ; 22 = P,G,P ; 21 = G,P,P ; 0 = no pattern
+        Ball[] seq = new Ball[SLOT_COUNT];
+        switch (tag) {
+            case 23: seq[0] = Ball.PURPLE; seq[1] = Ball.PURPLE; seq[2] = Ball.GREEN;  return seq;
+            case 22: seq[0] = Ball.PURPLE; seq[1] = Ball.GREEN;  seq[2] = Ball.PURPLE; return seq;
+            case 21: seq[0] = Ball.GREEN;  seq[1] = Ball.PURPLE; seq[2] = Ball.PURPLE; return seq;
+            default: return null;
+        }
+    }
+
+    /**
+     * Wheel angle needed so that POCKET 'slotIndex' is at world angle 'worldAngleDeg'.
+     * Relationship: wheelAngle + slotIndex*120 == worldAngle (mod 360)
+     */
+    private double wheelAngleForPocketAtWorldAngle(int slotIndex, double worldAngleDeg) {
+        return normalizeAngle(worldAngleDeg - slotIndex * DEGREES_PER_SLOT);
+    }
+
+    // =========================
+    // ===== SENSING (aligned) ==
+    // =========================
+    private void clearAllSensingCounters() {
+        slot0PresentFrames = 0;
+        slot0ColorFrames = 0;
+        slot0LastColorFrame = Ball.EMPTY;
+
+        for (int i = 0; i < SLOT_COUNT; i++) {
+            presentFrames[i] = 0;
+            colorFrames[i] = 0;
+            lastColorFrame[i] = Ball.EMPTY;
+        }
+    }
+
+    private void updateSensorsAligned(Telemetry telemetry) {
+        // ---- Slot1 & Slot2 (Brushland) ----
+        updateBrushlandSlot(1, slot1Present.getState(), slot1Green.getState(), telemetry);
+        updateBrushlandSlot(2, slot2Present.getState(), slot2Green.getState(), telemetry);
+
+        // If slot1 or slot2 filled while previously empty, slot0 must be reread
+        // (Implemented inside updateBrushlandSlot by setting slot0NeedsReread)
+
+        // ---- Slot0 (Rev color sensors) ----
+        if (slot0NeedsReread) {
+            slots[0] = Ball.EMPTY;
+            slot0PresentFrames = 0;
+            slot0ColorFrames = 0;
+            slot0LastColorFrame = Ball.EMPTY;
+        }
+
+        if (slots[0] == Ball.EMPTY) {
+            boolean present = slot0PresentThisFrame();
+            Ball frameColor = Ball.EMPTY;
+
+            if (present) frameColor = slot0ColorThisFrame(); // GREEN/PURPLE or EMPTY/UNKNOWN
+
+            if (!present) {
+                slot0PresentFrames = 0;
+                slot0ColorFrames = 0;
+                slot0LastColorFrame = Ball.EMPTY;
+            } else {
+                slot0PresentFrames++;
+
+                if (frameColor == Ball.GREEN || frameColor == Ball.PURPLE) {
+                    if (frameColor == slot0LastColorFrame) slot0ColorFrames++;
+                    else { slot0LastColorFrame = frameColor; slot0ColorFrames = 1; }
+                } else {
+                    // present but invalid color => don't advance colorFrames
+                    slot0LastColorFrame = Ball.EMPTY;
+                    slot0ColorFrames = 0;
+                }
+
+                if (slot0PresentFrames >= PRESENT_FRAMES_REQUIRED && slot0ColorFrames >= COLOR_FRAMES_REQUIRED) {
+                    slots[0] = slot0LastColorFrame;
+                    slot0NeedsReread = false;
+
+                    // reset counters to avoid double commit
+                    slot0PresentFrames = 0;
+                    slot0ColorFrames = 0;
+                    slot0LastColorFrame = Ball.EMPTY;
+
+                    if (telemetry != null) telemetry.addData("Slot0", "Committed %s", slots[0]);
+                }
+            }
+        }
+    }
+
+    private void updateBrushlandSlot(int slotIndex, boolean presentRaw, boolean greenRaw, Telemetry telemetry) {
+        if (slotIndex != 1 && slotIndex != 2) return;
+
+        // Only fill EMPTY -> color; do not clear after latched (your rule: assume stays until eject)
+        if (slots[slotIndex] != Ball.EMPTY) return;
+
+        boolean present = presentRaw; // active-high
+        Ball frameColor = Ball.EMPTY;
+
+        if (present) {
+            frameColor = greenRaw ? Ball.GREEN : Ball.PURPLE;
+        }
+
+        if (!present) {
+            presentFrames[slotIndex] = 0;
+            colorFrames[slotIndex] = 0;
+            lastColorFrame[slotIndex] = Ball.EMPTY;
+            return;
+        }
+
+        presentFrames[slotIndex]++;
+
+        if (frameColor == Ball.GREEN || frameColor == Ball.PURPLE) {
+            if (frameColor == lastColorFrame[slotIndex]) colorFrames[slotIndex]++;
+            else { lastColorFrame[slotIndex] = frameColor; colorFrames[slotIndex] = 1; }
+        } else {
+            lastColorFrame[slotIndex] = Ball.EMPTY;
+            colorFrames[slotIndex] = 0;
+        }
+
+        if (presentFrames[slotIndex] >= PRESENT_FRAMES_REQUIRED && colorFrames[slotIndex] >= COLOR_FRAMES_REQUIRED) {
+            slots[slotIndex] = lastColorFrame[slotIndex];
+
+            // IMPORTANT RULE: if slot1 or slot2 gets a ball, slot0 must be reread
+            slot0NeedsReread = true;
+
+            // reset counters
+            presentFrames[slotIndex] = 0;
+            colorFrames[slotIndex] = 0;
+            lastColorFrame[slotIndex] = Ball.EMPTY;
+
+            if (telemetry != null) telemetry.addData("Slot" + slotIndex, "Committed %s (slot0 reread)", slots[slotIndex]);
+        }
+    }
+
+    private boolean slot0PresentThisFrame() {
+        double d1 = slot0Color1.getDistance(DistanceUnit.CM);
+        double d2 = slot0Color2.getDistance(DistanceUnit.CM);
+
+        boolean p1 = !Double.isNaN(d1) && d1 <= SLOT0_DIST_THRESH_CM;
+        boolean p2 = !Double.isNaN(d2) && d2 <= SLOT0_DIST_THRESH_CM;
+        return p1 || p2;
+    }
+
+    private Ball slot0ColorThisFrame() {
+        // choose closest present sensor
+        double d1 = slot0Color1.getDistance(DistanceUnit.CM);
+        double d2 = slot0Color2.getDistance(DistanceUnit.CM);
+
+        boolean p1 = !Double.isNaN(d1) && d1 <= SLOT0_DIST_THRESH_CM;
+        boolean p2 = !Double.isNaN(d2) && d2 <= SLOT0_DIST_THRESH_CM;
+
+        if (!p1 && !p2) return Ball.EMPTY;
+
+        RevColorSensorV3 chosen;
+        if (p1 && p2) chosen = (d1 <= d2) ? slot0Color1 : slot0Color2;
+        else chosen = p1 ? slot0Color1 : slot0Color2;
+
+        RawColor raw = classifyColor(chosen);
+        if (raw == RawColor.GREEN) return Ball.GREEN;
+        if (raw == RawColor.PURPLE) return Ball.PURPLE;
+        return Ball.UNKNOWN;
+    }
+
+    private RawColor classifyColor(RevColorSensorV3 sensor) {
+        int r = sensor.red();
+        int g = sensor.green();
+        int b = sensor.blue();
+
+        int sum = r + g + b;
+        if (sum < 50) return RawColor.RED;
+
+        double rn = r / (double) sum;
+        double gn = g / (double) sum;
+        double bn = b / (double) sum;
+
+        boolean greenDominant = (gn > rn + 0.05) && (gn > bn + 0.02);
+        boolean redDominant   = (rn > gn + 0.10) && (rn > bn + 0.05);
+
+        if (greenDominant) return RawColor.GREEN;
+        if (redDominant) return RawColor.RED;
+        return RawColor.PURPLE;
+    }
+
+    private boolean isAlignedAtIntake() {
+        double cur = getCurrentAngleDeg();
+        double err = smallestAngleDiff(normalizeAngle(INTAKE_ANGLE_DEG), cur);
+        return Math.abs(err) <= ALIGN_TOL_DEG;
+    }
+
+    // =========================
+    // ===== MOTION CONTROL =====
+    // =========================
+    private void setMotorPower(double pwr) {
+        // Apply reversal with one switch
+        double out = REVERSE_MOTOR ? -pwr : pwr;
+        motor.setPower(Range.clip(out, -1.0, 1.0));
+    }
+
+    /** CW is positive angle direction (your convention). */
+    private boolean moveTowardTargetCW(double targetDeg) {
+        double cur = getCurrentAngleDeg();
+        double target = normalizeAngle(targetDeg);
+
+        double delta = cwDeltaDeg(cur, target); // [0,360)
+        if (delta <= MOVE_DONE_TOL_DEG) {
+            targetAngleDeg = target;
+            setMotorPower(0.0);
+            return true;
+        }
+
+        // CW-only => positive power in angle-space
+        double pwr = Range.clip(MOVE_kP * delta, 0.0, MOVE_MAX_POWER);
+        targetAngleDeg = target;
+        setMotorPower(+pwr);
+        return false;
+    }
+
+    /** CCW is negative angle direction (eject direction). */
+    private boolean moveTowardTargetCCW(double targetDeg) {
+        double cur = getCurrentAngleDeg();
+        double target = normalizeAngle(targetDeg);
+
+        double deltaCW = cwDeltaDeg(target, cur); // how far from cur to target going CCW
+        // Explanation: CCW distance from cur->target equals CW distance target->cur
+
+        if (deltaCW <= MOVE_DONE_TOL_DEG) {
+            targetAngleDeg = target;
+            setMotorPower(0.0);
+            return true;
+        }
+
+        // CCW-only => negative power in angle-space
+        double pwr = Range.clip(MOVE_kP * deltaCW, 0.0, MOVE_MAX_POWER);
+        targetAngleDeg = target;
+        setMotorPower(-pwr);
+        return false;
+    }
+
+    private void holdToTargetShortestPath() {
+        double cur = getCurrentAngleDeg();
+        double err = smallestAngleDiff(targetAngleDeg, cur); // [-180,180]
+
+        if (Math.abs(err) <= MOVE_DONE_TOL_DEG) {
+            setMotorPower(0.0);
+            return;
+        }
+
+        double pwr = Range.clip(HOLD_kP * err, -HOLD_MAX_POWER, HOLD_MAX_POWER);
+        setMotorPower(pwr);
+    }
+
+    // =========================
+    // ===== SHOOTING ===========
+    // =========================
+    private void beginShooting(long nowMs) {
+        shootRequested = false;
+
+        shootStartMs = nowMs;
+        shootLastMs = nowMs;
+        shootMovedDeg = 0.0;
+        shootLastTicks = motor.getCurrentPosition();
+
+        // Open-loop CCW (eject direction)
+        state = State.SHOOTING;
+    }
+
+    private boolean updateShooting(long nowMs) {
+        // Safety timeout
+        if (nowMs - shootStartMs > SHOOT_TIMEOUT_MS) {
+            setMotorPower(0.0);
+            return true;
+        }
+
+        // Track motion by encoder delta (absolute)
+        int curTicks = motor.getCurrentPosition();
+        int dTicks = curTicks - shootLastTicks;
+        shootLastTicks = curTicks;
+
+        shootMovedDeg += Math.abs(dTicks) * DEG_PER_TICK;
+
+        // Power profile
+        double pwr = (nowMs - shootStartMs <= SHOOT_HIGH_MS) ? SHOOT_POWER_HIGH : SHOOT_POWER_LOW;
+
+        // CCW is eject direction => negative power in angle-space
+        setMotorPower(-pwr);
+
+        // Done?
+        if (shootMovedDeg >= SHOOT_DEG) {
+            setMotorPower(0.0);
+            return true;
+        }
+
+        return false;
+    }
+
+    // =========================
+    // ===== ANGLE MATH =========
+    // =========================
+    private double normalizeAngle(double a) {
+        return (a % 360.0 + 360.0) % 360.0;
+    }
+
+    private double smallestAngleDiff(double target, double current) {
+        double diff = normalizeAngle(target) - normalizeAngle(current);
+        diff = (diff + 540.0) % 360.0 - 180.0;
+        return diff;
+    }
+
+    /** CW delta from 'from' to 'to' in [0,360). */
+    private double cwDeltaDeg(double fromDeg, double toDeg) {
+        double f = normalizeAngle(fromDeg);
+        double t = normalizeAngle(toDeg);
+        return (t - f + 360.0) % 360.0;
+    }
+
+    private double ticksToAngle(int ticks) {
+        // If REVERSE_MOTOR flips, motor ticks move opposite direction for the same physical motion
+        // -> account here by flipping the relative tick direction.
+        int rel = ticks - zeroTicks;
+        int signedRel = REVERSE_MOTOR ? -rel : rel;
+
+        double revs = signedRel / TICKS_PER_REV;
+        return normalizeAngle(INTAKE_ANGLE_DEG + revs * 360.0);
+    }
+
+    private int angleToTicks(double angleDeg) {
+        double norm = normalizeAngle(angleDeg - INTAKE_ANGLE_DEG);
+        double revs = norm / 360.0;
+
+        int signedRel = (int) Math.round(revs * TICKS_PER_REV);
+        int rel = REVERSE_MOTOR ? -signedRel : signedRel;
+        return zeroTicks + rel;
+    }
+}
