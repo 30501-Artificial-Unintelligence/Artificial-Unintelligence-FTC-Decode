@@ -27,6 +27,12 @@ android {
     }
 }
 
+repositories {
+    maven {
+        url "https://repo.dairy.foundation/releases"
+    }
+}
+
 dependencies {
     implementation project(':FtcRobotController')
     //implementation 'org.ftclib.ftclib:core:2.1.1' // core
@@ -35,5 +41,6 @@ dependencies {
     implementation "com.bylazar:graph:1.0.4"
     //implementation "com.bylazar:panels:1.0.5"
     implementation "com.bylazar:utils:1.0.4"
-
+    implementation "org.solverslib:core:0.3.3" // core
+    implementation "org.solverslib:pedroPathing:0.3.3" // pedroPathing
 }

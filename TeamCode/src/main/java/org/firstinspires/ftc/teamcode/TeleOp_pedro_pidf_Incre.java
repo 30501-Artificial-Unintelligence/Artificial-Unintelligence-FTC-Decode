@@ -29,6 +29,7 @@ import org.firstinspires.ftc.teamcode.subsystems.TurretSubsystemIncremental;
 import org.firstinspires.ftc.teamcode.subsystems.VisionSubsystem;
 
 import java.util.function.Supplier;
+import org.firstinspires.ftc.teamcode.subsystems.util.BulkCacheManager;
 
 @Configurable
 @TeleOp(name = "TeleOp with pedro and pidf _ incremental", group = "Test")
@@ -51,6 +52,7 @@ public class TeleOp_pedro_pidf_Incre extends OpMode {
     private LoaderSubsystem loader;
     private TurretSubsystemIncremental turret;
     private VisionSubsystem vision;
+    private BulkCacheManager bulk;
 
     // ===== DASHBOARD =====
     private FtcDashboard dashboard;
@@ -141,6 +143,10 @@ public class TeleOp_pedro_pidf_Incre extends OpMode {
 
     @Override
     public void init() {
+
+        //initailize bulk reading
+        bulk = new BulkCacheManager(hardwareMap);
+
         follower = Constants.createFollower(hardwareMap);
 
         Drawing.init();
@@ -199,6 +205,7 @@ public class TeleOp_pedro_pidf_Incre extends OpMode {
 
     @Override
     public void loop() {
+
         long now = System.currentTimeMillis();
 
 //        if (loopTimerPrimed) {
