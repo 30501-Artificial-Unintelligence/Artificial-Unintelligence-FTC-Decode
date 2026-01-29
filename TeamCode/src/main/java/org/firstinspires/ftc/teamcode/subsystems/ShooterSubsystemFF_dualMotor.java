@@ -80,7 +80,7 @@ public class ShooterSubsystemFF_dualMotor {
     public ShooterSubsystemFF_dualMotor(HardwareMap hardwareMap) {
         // If you want SolversLib to “know” CPR/RPM, use the (cpr, rpm) constructor
         motor1 = new MotorEx(hardwareMap, "motor_one", TICKS_PER_REV, PHYSICAL_MAX_MOTOR_RPM);
-        motor2 = new MotorEx(hardwareMap, "motor_two", TICKS_PER_REV, PHYSICAL_MAX_MOTOR_RPM);
+        motor2 = new MotorEx(hardwareMap, "turretMotor", TICKS_PER_REV, PHYSICAL_MAX_MOTOR_RPM);
 
         hoodServo = new ServoEx(hardwareMap, "hoodServo");
 
@@ -240,4 +240,22 @@ public class ShooterSubsystemFF_dualMotor {
         motor2.set(0.0);
         light.setColor(1);
     }
+
+    // Returns the SAME target the controller is actually using (flywheel RPM)
+    public double getActiveTargetRpm() {
+        return TUNE_FORCE_ON ? TUNE_FORCE_RPM : getTargetRpm();
+    }
+
+    // Returns FLYWHEEL rpm estimate using the cached last velocity from update()
+    public double getCurrentRpmEstimate() {
+        // lastVelMotorTps is motor-domain ticks/sec (avg of both motors)
+        double motorRpm = ticksPerSecToMotorRpm(lastVelMotorTps);
+        return motorRpmToFlywheelRpm(motorRpm);
+    }
+
+    // Flywheel RPM error = target - current
+    public double getErrorRpm() {
+        return getActiveTargetRpm() - getCurrentRpmEstimate();
+    }
+
 }

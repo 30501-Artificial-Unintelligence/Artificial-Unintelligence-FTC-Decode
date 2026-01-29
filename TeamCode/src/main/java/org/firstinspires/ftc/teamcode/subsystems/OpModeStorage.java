@@ -14,6 +14,7 @@ public final class OpModeStorage {
     // ===== Turret incremental reference =====
     public static Double turretAngleOffsetDeg = null; // currentAngleDeg = offset + ticks/ticksPerDeg
     public static Boolean turretTrackEnabled = null;
+    public static Double turretShaftContinuousDeg = null;
 
     // ===== Spindexer incremental reference =====
     public static Integer spindexerZeroTicks = null;   // ticks corresponding to internal angle 0 (slot0@intake = 0°)

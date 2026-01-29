@@ -25,7 +25,7 @@ import org.firstinspires.ftc.teamcode.subsystems.PoseStorage;
 import org.firstinspires.ftc.teamcode.subsystems.ShooterSubsystemFF;
 import org.firstinspires.ftc.teamcode.subsystems.SpindexerSubsystem_State_new;
 import org.firstinspires.ftc.teamcode.subsystems.SpindexerSubsystem_State_new_Incremental;
-import org.firstinspires.ftc.teamcode.subsystems.TurretSubsystemIncremental;
+import org.firstinspires.ftc.teamcode.subsystems.TurretSubsystemIncremental_Swyft;
 import org.firstinspires.ftc.teamcode.subsystems.VisionSubsystem;
 
 import java.util.function.Supplier;
@@ -50,7 +50,7 @@ public class TeleOp_pedro_pidf_Incre extends OpMode {
     private IntakeSubsystem_Motor intake;
     private SpindexerSubsystem_State_new_Incremental spindexer;
     private LoaderSubsystem loader;
-    private TurretSubsystemIncremental turret;
+    private TurretSubsystemIncremental_Swyft turret;
     private VisionSubsystem vision;
     private BulkCacheManager bulk;
 
@@ -176,7 +176,7 @@ public class TeleOp_pedro_pidf_Incre extends OpMode {
         loader    = new LoaderSubsystem(hardwareMap);
         intake    = new IntakeSubsystem_Motor(hardwareMap);
         spindexer = new SpindexerSubsystem_State_new_Incremental(hardwareMap);
-        turret    = new TurretSubsystemIncremental(hardwareMap);
+        turret    = new TurretSubsystemIncremental_Swyft(hardwareMap);
         vision    = new VisionSubsystem(hardwareMap);
 
         dashboard = FtcDashboard.getInstance();
@@ -721,4 +721,5 @@ public class TeleOp_pedro_pidf_Incre extends OpMode {
             default: return "Unknown(tag=" + tag + ")";
         }
     }
+
 }
