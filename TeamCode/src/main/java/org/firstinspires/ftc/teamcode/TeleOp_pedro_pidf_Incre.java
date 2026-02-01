@@ -463,6 +463,7 @@ public class TeleOp_pedro_pidf_Incre extends OpMode {
         prev2Down = dDown2;
 
         // ===== SPINDEXER UPDATE =====
+        spindexer.setI2cAllowed(!shooter.isOn());
         spindexerIsFull = spindexer.update(telemetry, loader, yEdge, driverPatternTag);
 
         // Update loader after spindexer (spindexer may trigger loader.startCycle())

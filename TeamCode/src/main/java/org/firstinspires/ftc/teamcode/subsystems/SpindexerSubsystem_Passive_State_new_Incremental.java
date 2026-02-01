@@ -40,7 +40,7 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
      */
     public static boolean REVERSE_MOTOR = true;
 
-    // ===== OLD incremental PID defaults you gave me =====
+    // ===== OLD incremental PID defaults =====
     // (Used for both MOVE and HOLD; HOLD is limited by HOLD_MAX_POWER.)
     public static double kP = 0.008;
     public static double kI = 0.0;
@@ -49,6 +49,21 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
 
     // Integral clamp (anti-windup)
     public static double I_CLAMP = 200.0;
+
+    // ===== LOOP-TIME / I2C CONTROL =====
+
+    // Master switch: if false, slot0 Rev sensors are NEVER read (safe if sensors missing)
+    public static boolean ENABLE_SLOT0_I2C = true;
+
+    // If true, slot0 I2C is skipped whenever i2cAllowed is false (we'll set that from TeleOp)
+    public static boolean SKIP_SLOT0_I2C_WHEN_SHOOTER_ON = true;
+
+    // Optional: if true, skip *all* sensing (digital + I2C) when i2cAllowed is false
+    public static boolean SKIP_ALL_SENSORS_WHEN_SHOOTER_ON = false;
+
+    // Optional throttling (0 = no throttle; read as fast as loop runs)
+    public static long SLOT0_I2C_PERIOD_MS = 0;
+
 
     // ===== Panels slot simulation / override (for testing without Brushlands) =====
     public static boolean USE_PANELS_SLOT_OVERRIDE = false;
@@ -112,7 +127,7 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
     public static double SHOOT_POWER_HIGH = 1.0;
     public static double SHOOT_POWER_LOW  = 0.9;
     public static long   SHOOT_HIGH_MS    = 300;
-    public static long   SHOOT_TIMEOUT_MS = 4500;
+    public static long   SHOOT_TIMEOUT_MS = 2500;
 
     // Pattern override (same idea as your old code)
     // -1 means no override; else 0/21/22/23
@@ -250,6 +265,25 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
         PREFER_CCW
     }
 
+    // TeleOp can set this each loop (ex: disable I2C while shooter is running)
+    private boolean i2cAllowed = true;
+
+    public void setI2cAllowed(boolean allowed) {
+        this.i2cAllowed = allowed;
+    }
+
+    // slot0 cached frame + optional throttling time
+    private long slot0LastI2cMs = 0;
+
+    private static class Slot0Frame {
+        boolean present;
+        Ball color;
+        Slot0Frame(boolean p, Ball c) { present = p; color = c; }
+    }
+
+    private Slot0Frame slot0CachedFrame = new Slot0Frame(false, Ball.EMPTY);
+
+
     // =========================
     // ===== CONSTRUCTOR ========
     // =========================
@@ -258,8 +292,8 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
         motor.setMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
         motor.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
 
-        slot0Color1 = hardwareMap.get(RevColorSensorV3.class, "spindexerIntakeColorSensor1");
-        slot0Color2 = hardwareMap.get(RevColorSensorV3.class, "spindexerIntakeColorSensor2");
+        slot0Color1 = safeGetRev(hardwareMap, "spindexerIntakeColorSensor1");
+        slot0Color2 = safeGetRev(hardwareMap, "spindexerIntakeColorSensor2");
 
         slot1Present = hardwareMap.get(DigitalChannel.class, SLOT1_PRESENT_NAME);
         slot1Green   = hardwareMap.get(DigitalChannel.class, SLOT1_GREEN_NAME);
@@ -502,7 +536,7 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
         // Update sensing ONLY when aligned at intake and NOT shooting
         boolean aligned = isAlignedAtIntake();
         if (aligned && state != State.SHOOTING) {
-            updateSensorsAligned(telemetry);
+            updateSensorsAligned(telemetry, nowMs);
         }
 
         // If we become full in IDLE, start positioning to preshoot (but do not shoot yet)
@@ -705,7 +739,7 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
         }
     }
 
-    private void updateSensorsAligned(Telemetry telemetry) {
+    private void updateSensorsAligned(Telemetry telemetry, long nowMs) {
         // Slot1 & Slot2 (Brushland)
         updateBrushlandSlot(1, slot1Present.getState(), slot1Green.getState(), telemetry);
         updateBrushlandSlot(2, slot2Present.getState(), slot2Green.getState(), telemetry);
@@ -720,9 +754,9 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
         }
 
         if (slots[0] == Ball.EMPTY) {
-            boolean present = slot0PresentThisFrame();
-            Ball frameColor = Ball.EMPTY;
-            if (present) frameColor = slot0ColorThisFrame();
+            Slot0Frame f = readSlot0Frame(nowMs);
+            boolean present = f.present;
+            Ball frameColor = f.color;
 
             if (!present) {
                 slot0PresentFrames = 0;
@@ -844,6 +878,56 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
         double cur = getCurrentAngleDeg();
         double err = smallestAngleDiff(normalizeAngle(INTAKE_ANGLE_DEG), cur);
         return Math.abs(err) <= ALIGN_TOL_DEG;
+    }
+
+    private Slot0Frame readSlot0Frame(long nowMs) {
+
+        // Master switch: never touch I2C
+        if (!ENABLE_SLOT0_I2C) return new Slot0Frame(false, Ball.EMPTY);
+
+        // Shooter gate: skip slot0 I2C when shooter is on (TeleOp sets i2cAllowed)
+        if (SKIP_SLOT0_I2C_WHEN_SHOOTER_ON && !i2cAllowed) {
+            return new Slot0Frame(false, Ball.EMPTY);
+        }
+
+        // Sensors missing? Never touch I2C
+        if (slot0Color1 == null || slot0Color2 == null) {
+            return new Slot0Frame(false, Ball.EMPTY);
+        }
+
+        // Optional throttling (0 = no throttle)
+        if (SLOT0_I2C_PERIOD_MS > 0 && (nowMs - slot0LastI2cMs) < SLOT0_I2C_PERIOD_MS) {
+            return slot0CachedFrame;
+        }
+
+        slot0LastI2cMs = nowMs;
+
+        // ---- Distance reads ONCE ----
+        double d1 = slot0Color1.getDistance(DistanceUnit.CM);
+        double d2 = slot0Color2.getDistance(DistanceUnit.CM);
+
+        boolean p1 = !Double.isNaN(d1) && d1 <= SLOT0_DIST_THRESH_CM;
+        boolean p2 = !Double.isNaN(d2) && d2 <= SLOT0_DIST_THRESH_CM;
+
+        boolean present = p1 || p2;
+        if (!present) {
+            slot0CachedFrame = new Slot0Frame(false, Ball.EMPTY);
+            return slot0CachedFrame;
+        }
+
+        // Choose closest present sensor (no extra distance reads)
+        RevColorSensorV3 chosen;
+        if (p1 && p2) chosen = (d1 <= d2) ? slot0Color1 : slot0Color2;
+        else chosen = p1 ? slot0Color1 : slot0Color2;
+
+        // ---- RGB reads ONCE ----
+        RawColor raw = classifyColor(chosen);
+        Ball c = (raw == RawColor.GREEN) ? Ball.GREEN
+                : (raw == RawColor.PURPLE) ? Ball.PURPLE
+                : Ball.UNKNOWN;
+
+        slot0CachedFrame = new Slot0Frame(true, c);
+        return slot0CachedFrame;
     }
 
     // =========================
@@ -1007,4 +1091,13 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
         int rel = REVERSE_MOTOR ? -signedRel : signedRel;
         return zeroTicks + rel;
     }
+
+    private static RevColorSensorV3 safeGetRev(HardwareMap hw, String name) {
+        try {
+            return hw.get(RevColorSensorV3.class, name);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
 }
