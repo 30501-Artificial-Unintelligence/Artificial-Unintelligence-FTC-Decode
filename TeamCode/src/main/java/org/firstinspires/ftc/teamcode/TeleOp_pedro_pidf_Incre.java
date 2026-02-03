@@ -2,10 +2,10 @@ package org.firstinspires.ftc.teamcode;
 
 import com.acmerobotics.dashboard.FtcDashboard;
 import com.acmerobotics.dashboard.telemetry.MultipleTelemetry;
-import com.acmerobotics.dashboard.telemetry.TelemetryPacket;
 import com.bylazar.configurables.annotations.Configurable;
 import com.bylazar.telemetry.PanelsTelemetry;
 import com.bylazar.telemetry.TelemetryManager;
+import com.bylazar.utils.LoopTimer;
 import com.pedropathing.follower.Follower;
 import com.pedropathing.geometry.BezierLine;
 import com.pedropathing.geometry.Pose;
@@ -15,7 +15,6 @@ import com.pedropathing.paths.PathChain;
 import com.qualcomm.robotcore.eventloop.opmode.OpMode;
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
 import com.qualcomm.robotcore.util.Range;
-import com.bylazar.utils.LoopTimer;
 
 import org.firstinspires.ftc.teamcode.pedroPathing.Constants;
 import org.firstinspires.ftc.teamcode.subsystems.Drawing;
@@ -23,13 +22,13 @@ import org.firstinspires.ftc.teamcode.subsystems.IntakeSubsystem;
 import org.firstinspires.ftc.teamcode.subsystems.LoaderSubsystem;
 import org.firstinspires.ftc.teamcode.subsystems.PoseStorage;
 import org.firstinspires.ftc.teamcode.subsystems.ShooterSubsystemFF_dualMotor;
-import org.firstinspires.ftc.teamcode.subsystems.SpindexerSubsystem_State_new;
 import org.firstinspires.ftc.teamcode.subsystems.SpindexerSubsystem_Passive_State_new_Incremental;
 import org.firstinspires.ftc.teamcode.subsystems.TurretSubsystemIncremental;
 import org.firstinspires.ftc.teamcode.subsystems.VisionSubsystem;
-
-import java.util.function.Supplier;
 import org.firstinspires.ftc.teamcode.subsystems.util.BulkCacheManager;
+
+import java.lang.reflect.Field;
+import java.util.function.Supplier;
 
 @Configurable
 @TeleOp(name = "TeleOp with pedro and pidf _ incremental", group = "Test")
@@ -40,9 +39,8 @@ public class TeleOp_pedro_pidf_Incre extends OpMode {
     public static Pose startingPose;
     private boolean automatedDrive = false;
     private Supplier<PathChain> pathChain;
+
     private TelemetryManager telemetryM;
-
-
     private boolean slowMode = false;
 
     // ===== SUBSYSTEMS =====
@@ -57,18 +55,17 @@ public class TeleOp_pedro_pidf_Incre extends OpMode {
     // ===== DASHBOARD =====
     private FtcDashboard dashboard;
 
-    // ===== STATE VARIABLES =====
+    // ===== STATE =====
     private boolean prev2a = false;
-
     private int fieldPos = 0; // 0 near, 1 far
     private boolean spindexerIsFull = false;
-
     private boolean shooterOn = false;
     private boolean intakeOn = false;
 
     // turret preset edges
     private boolean prevA = false, prevDpadL = false, prevDpadR = false;
 
+    // spindown logic
     private long shooterSpinDownDeadline = 0;
     private boolean lastEjecting = false;
 
@@ -84,25 +81,26 @@ public class TeleOp_pedro_pidf_Incre extends OpMode {
 
     // turret mode cycle edge
     private boolean prevModeX = false;
+
     // ===== Shooter manual spin-up toggle (gamepad1.rb) =====
     private boolean shooterManualHold = false;
     private boolean prevRB1 = false;
 
-    // ===== SHOOT POSES (tune these numbers) =====
+    // ===== BangBang toggle (gamepad1.lb) - reflection safe =====
+    private boolean prevLB1 = false;
+
+    // ===== SHOOT POSES =====
     public static Pose SHOOT_POSE_NEAR = new Pose(80, 80, Math.toRadians(45));
     public static Pose SHOOT_POSE_FAR  = new Pose(80.6, 17, Math.toRadians(90));
 
-    // Aim offset applied to Limelight tx (deg). Tune in Panels.
-// fieldPos: 0 = near, 1 = far
+    // Aim offset applied to Limelight tx (deg).
     public static double AIM_OFFSET_NEAR_DEG = 0.0;
     public static double AIM_OFFSET_FAR_DEG  = 4.0;
-
 
     // ===== SHOOT ASSIST STATE =====
     private boolean shootAssistActive = false;
     private boolean prevShootAssistBtn = false;
     private Pose activeShootPose = SHOOT_POSE_NEAR;
-
     private boolean autoFirePulse = false;
     private long autoFireCooldownUntil = 0;
 
@@ -117,12 +115,7 @@ public class TeleOp_pedro_pidf_Incre extends OpMode {
 
     private enum TurretAimMode { MANUAL_HOLD, VISION_TRACK, ODO_FACE_POINT }
     private TurretAimMode turretAimMode = TurretAimMode.MANUAL_HOLD;
-
-    // Remember what turret mode we were in before shoot assist
     private TurretAimMode turretAimModeBeforeAssist = TurretAimMode.MANUAL_HOLD;
-
-    // (optional) not required, but useful if you later add hysteresis
-    private boolean assistVisionEnabled = false;
 
     // Face point in ODO mode (Pedro coords)
     public static double ODO_FACE_X = 132.0;
@@ -130,47 +123,66 @@ public class TeleOp_pedro_pidf_Incre extends OpMode {
 
     // ===== POST-PATH ACTIONS =====
     private boolean postPathActionsDone = false;
-
     private boolean waitingForTagAfterAssist = false;
     public static int TAG_STABLE_FRAMES = 3;
     private int tagStableCount = 0;
 
-    private final LoopTimer loopTimer = new LoopTimer(10); // smoothing window
+    // ===== LOOP TIMER =====
+    private final LoopTimer loopTimer = new LoopTimer(10);
     private boolean loopTimerPrimed = false;
-
-    private long worstMs = 0;
+    private long worstLoopMs = 0;
 
     private long lastPanelsUpdateMs = 0;
     private static final long PANELS_PERIOD_MS = 100; // 10 Hz
 
+    // ===== SIMPLE PER-SUBSYSTEM PROFILING =====
+    private static class Sec {
+        double lastMs = 0;
+        double emaMs  = 0;
+        double worstMs= 0;
+        void push(double ms) {
+            lastMs = ms;
+            emaMs = (emaMs == 0) ? ms : (0.15 * ms + 0.85 * emaMs);
+            if (ms > worstMs) worstMs = ms;
+        }
+    }
+
+    private final Sec secFollower  = new Sec();
+    private final Sec secVision    = new Sec();
+    private final Sec secTurret    = new Sec();
+    private final Sec secSpindexer = new Sec();
+    private final Sec secLoader    = new Sec();
+    private final Sec secShooter   = new Sec();
+    private final Sec secIntake    = new Sec();
+    private final Sec secTelemetry = new Sec();
+
+    // cached timing values you can display even if you don’t push telemetry each loop
+    private double loopLastMs = 0;
+    private double loopHz = 0;
 
     @Override
     public void init() {
-
-        //initailize bulk reading
+        // bulk reading manager (you said auto bulk is enabled on TeleOp side)
         bulk = new BulkCacheManager(hardwareMap);
 
         follower = Constants.createFollower(hardwareMap);
-
         Drawing.init();
 
-        Pose startPose =
-                (PoseStorage.lastPose != null) ? PoseStorage.lastPose :
-                        (startingPose != null) ? startingPose :
-                                Drawing.getStartingPose();
+        Pose startPose = (PoseStorage.lastPose != null)
+                ? PoseStorage.lastPose
+                : (startingPose != null) ? startingPose : Drawing.getStartingPose();
 
         follower.setStartingPose(startPose);
         follower.update();
 
         telemetryM = PanelsTelemetry.INSTANCE.getTelemetry();
 
+        // (optional) example pathchain you had
         pathChain = () -> follower.pathBuilder()
                 .addPath(new Path(new BezierLine(follower::getPose, new Pose(45, 98))))
                 .setHeadingInterpolation(
                         HeadingInterpolator.linearFromPoint(
-                                follower::getHeading,
-                                Math.toRadians(45),
-                                0.8
+                                follower::getHeading, Math.toRadians(45), 0.8
                         )
                 )
                 .build();
@@ -184,14 +196,12 @@ public class TeleOp_pedro_pidf_Incre extends OpMode {
 
         dashboard = FtcDashboard.getInstance();
         telemetry = new MultipleTelemetry(telemetry, dashboard.getTelemetry());
-
         telemetry.addLine("TeleOp with Pedro + Shooter PIDF (Incremental)");
         telemetry.update();
 
-        loopTimer.start();      // prime the timer so the first loop has a start()
+        loopTimer.start();
         loopTimerPrimed = true;
-        worstMs = 0;
-
+        worstLoopMs = 0;
     }
 
     @Override
@@ -199,57 +209,38 @@ public class TeleOp_pedro_pidf_Incre extends OpMode {
         follower.startTeleopDrive();
         shooterSpinDownDeadline = 0;
 
-//        spindexer.homeToIntake();//different from homing load
         // Do NOT auto-home if you want Auto -> TeleOp continuity.
-        // Just hold turret where it already is.
         turret.goToAngle(turret.getCurrentAngleDeg());
         turretPositionCommandActive = true;
     }
 
     @Override
     public void loop() {
+        final long nowMs = System.currentTimeMillis();
 
-        long now = System.currentTimeMillis();
+        // ===== LOOP TIMER (total loop interval) =====
+        if (loopTimerPrimed) {
+            loopTimer.end();
+            long ms = loopTimer.getMs();
+            loopLastMs = ms;
+            loopHz = loopTimer.getHz();
+            if (ms > worstLoopMs) worstLoopMs = ms;
+        }
+        loopTimer.start();
 
-//        if (loopTimerPrimed) {
-//            loopTimer.end();              // measures time since last start()
-//            long ms = loopTimer.getMs();
-//            double hz = loopTimer.getHz();
-//
-//            if (ms > worstMs) worstMs = ms;
-//
-//            // Panels text
-//            telemetryM.debug(String.format("Loop: %d ms | %.1f Hz | worst: %d ms", ms, hz, worstMs));
-//
-//            // Panels graphs
-//            telemetryM.addData("loop/ms", ms);
-//            telemetryM.addData("loop/hz", hz);
-//            telemetryM.addData("loop/worst_ms", worstMs);
-//
-//            // push to panels (and DS if you pass DS telemetry into telemetryM)
-//            long nowMs = System.currentTimeMillis();
-//
-//            if (nowMs - lastPanelsUpdateMs >= PANELS_PERIOD_MS) {
-//                lastPanelsUpdateMs = nowMs;
-//                telemetryM.update(telemetry);
-//                telemetry.update();
-//            }
-//
-//        }
-
-// restart timer for next loop interval
-        //loopTimer.start();
-
-        // ===== UPDATE PEDRO FOLLOWER =====
+        // ===== FOLLOWER UPDATE =====
+        long t0 = System.nanoTime();
         follower.update();
-        //telemetryM.update();
+        secFollower.push((System.nanoTime() - t0) / 1e6);
 
         Drawing.drawRobot(follower.getPose());
         Drawing.sendPacket();
 
+        final Pose poseNow = follower.getPose();
+
         // ===== DRIVETRAIN =====
-        double leftX  = gamepad2.left_stick_x;
-        double leftY  = gamepad2.left_stick_y;
+        double leftX = gamepad2.left_stick_x;
+        double leftY = gamepad2.left_stick_y;
         double rightX = gamepad2.right_stick_x;
 
         boolean a2 = gamepad2.a;
@@ -257,7 +248,6 @@ public class TeleOp_pedro_pidf_Incre extends OpMode {
         prev2a = a2;
 
         double driveScale = slowMode ? 0.4 : 1.0;
-
         if (!automatedDrive) {
             follower.setTeleOpDrive(
                     -leftY * driveScale,
@@ -275,10 +265,9 @@ public class TeleOp_pedro_pidf_Incre extends OpMode {
         boolean b1Edge = gamepad1.b && !prevB1;
         prevB1 = gamepad1.b;
 
-        boolean driverOverride =
-                Math.abs(gamepad2.left_stick_x) > 0.2 ||
-                        Math.abs(gamepad2.left_stick_y) > 0.2 ||
-                        Math.abs(gamepad2.right_stick_x) > 0.2;
+        boolean driverOverride = Math.abs(gamepad2.left_stick_x) > 0.2
+                || Math.abs(gamepad2.left_stick_y) > 0.2
+                || Math.abs(gamepad2.right_stick_x) > 0.2;
 
         if (shootAssistEdge) {
             if (!shootAssistActive) {
@@ -288,43 +277,40 @@ public class TeleOp_pedro_pidf_Incre extends OpMode {
                 cancelShootAssist();
             }
         }
-
-        if (shootAssistActive && (b1Edge || driverOverride)) {
-            cancelShootAssist();
-        }
+        if (shootAssistActive && (b1Edge || driverOverride)) cancelShootAssist();
 
         if (shootAssistActive && automatedDrive && !follower.isBusy()) {
             follower.startTeleopDrive();
             automatedDrive = false;
 
             if (!postPathActionsDone) {
-                // Step 1: point turret to the "tag-visible" angle first
+                // Step 1: point turret to tag-visible angle
                 turretAimMode = TurretAimMode.MANUAL_HOLD;
                 turret.goToAngle(0.0);
                 turretPositionCommandActive = true;
 
-                // Step 2: wait until tag is actually seen, then switch to tracking
+                // Step 2: wait until tag is seen then enable tracking
                 waitingForTagAfterAssist = true;
                 tagStableCount = 0;
-
                 postPathActionsDone = true;
             }
         }
 
-        // ===== Shoot Assist: when arrived, hold turret at 0 until we see tag, then enable tracking =====
-        if (shootAssistActive && postPathActionsDone && waitingForTagAfterAssist) {
-            double tx = vision.getGoalTxDegOrNaN();
+        // ===== Vision read ONCE per loop (use everywhere) =====
+        t0 = System.nanoTime();
+        double txGoal = vision.getGoalTxDegOrNaN();
+        secVision.push((System.nanoTime() - t0) / 1e6);
 
-            if (!Double.isNaN(tx)) tagStableCount++;
+        // ===== Shoot Assist: acquire tag stable before enabling tracking =====
+        if (shootAssistActive && postPathActionsDone && waitingForTagAfterAssist) {
+            if (!Double.isNaN(txGoal)) tagStableCount++;
             else tagStableCount = 0;
 
             if (tagStableCount >= TAG_STABLE_FRAMES) {
                 waitingForTagAfterAssist = false;
                 turretAimMode = TurretAimMode.VISION_TRACK;
                 turretPositionCommandActive = true;
-                assistVisionEnabled = true;
             } else {
-                // keep turret pointed at 0 so camera can acquire tag
                 turretAimMode = TurretAimMode.MANUAL_HOLD;
                 turret.goToAngle(0.0);
                 turretPositionCommandActive = true;
@@ -335,7 +321,6 @@ public class TeleOp_pedro_pidf_Incre extends OpMode {
         boolean yUser = gamepad1.y;
         boolean yEdgeUser = yUser && !prevY;
         prevY = yUser;
-
         boolean yEdge = yEdgeUser || autoFirePulse;
         autoFirePulse = false;
 
@@ -348,17 +333,16 @@ public class TeleOp_pedro_pidf_Incre extends OpMode {
         boolean modeX = gamepad1.x;
         boolean modeEdge = modeX && !prevModeX;
         prevModeX = modeX;
-
         if (modeEdge) {
             switch (turretAimMode) {
-                case MANUAL_HOLD:    turretAimMode = TurretAimMode.VISION_TRACK; break;
-                case VISION_TRACK:   turretAimMode = TurretAimMode.ODO_FACE_POINT; break;
+                case MANUAL_HOLD: turretAimMode = TurretAimMode.VISION_TRACK; break;
+                case VISION_TRACK: turretAimMode = TurretAimMode.ODO_FACE_POINT; break;
                 case ODO_FACE_POINT: turretAimMode = TurretAimMode.MANUAL_HOLD; break;
             }
         }
 
         // ===== PRESET ANGLES =====
-        boolean a  = gamepad1.a;
+        boolean a = gamepad1.a;
         boolean dl = gamepad1.dpad_left;
         boolean dr = gamepad1.dpad_right;
 
@@ -366,22 +350,31 @@ public class TeleOp_pedro_pidf_Incre extends OpMode {
         boolean dlEdge = dl && !prevDpadL;
         boolean drEdge = dr && !prevDpadR;
 
-        prevA = a;
-        prevDpadL = dl;
-        prevDpadR = dr;
+        prevA = a; prevDpadL = dl; prevDpadR = dr;
 
-        if (aEdge)  { turretAimMode = TurretAimMode.MANUAL_HOLD; turret.goToAngle(0.0);    turretPositionCommandActive = true; }
-        if (dlEdge) { turretAimMode = TurretAimMode.MANUAL_HOLD; turret.goToAngle(-90.0); turretPositionCommandActive = true; }
-        if (drEdge) { turretAimMode = TurretAimMode.MANUAL_HOLD; turret.goToAngle(90.0);  turretPositionCommandActive = true; }
+        if (aEdge) {
+            turretAimMode = TurretAimMode.MANUAL_HOLD;
+            turret.goToAngle(0.0);
+            turretPositionCommandActive = true;
+        }
+        if (dlEdge) {
+            turretAimMode = TurretAimMode.MANUAL_HOLD;
+            turret.goToAngle(-90.0);
+            turretPositionCommandActive = true;
+        }
+        if (drEdge) {
+            turretAimMode = TurretAimMode.MANUAL_HOLD;
+            turret.goToAngle(90.0);
+            turretPositionCommandActive = true;
+        }
 
         // ===== TURRET MANUAL/TRACKING =====
         double stickX = gamepad1.right_stick_x;
         boolean manualActive = Math.abs(stickX) > 0.05;
 
-        if (manualActive) {
-            waitingForTagAfterAssist = false;
-        }
+        if (manualActive) waitingForTagAfterAssist = false;
 
+        t0 = System.nanoTime();
         if (manualActive) {
             turretAimMode = TurretAimMode.MANUAL_HOLD;
             turretPositionCommandActive = false;
@@ -389,14 +382,10 @@ public class TeleOp_pedro_pidf_Incre extends OpMode {
         } else {
             switch (turretAimMode) {
                 case VISION_TRACK: {
-                    double tx = vision.getGoalTxDegOrNaN();
-
-                    // pick offset based on fieldPos (your existing toggle)
                     double offset = (fieldPos == 0) ? AIM_OFFSET_NEAR_DEG : AIM_OFFSET_FAR_DEG;
 
-                    if (!Double.isNaN(tx)) {
-                        double aimErrDeg = TX_SIGN * (tx + offset);
-
+                    if (!Double.isNaN(txGoal)) {
+                        double aimErrDeg = TX_SIGN * (txGoal + offset);
                         if (Math.abs(aimErrDeg) > TX_DEADBAND_DEG) {
                             double step = Range.clip(aimErrDeg, -TX_MAX_STEP_DEG, TX_MAX_STEP_DEG);
                             turret.goToAngle(turret.getCurrentAngleDeg() + step);
@@ -406,7 +395,6 @@ public class TeleOp_pedro_pidf_Incre extends OpMode {
                             turretPositionCommandActive = true;
                         }
                     } else {
-                        // no tag: hold position (or you could choose to re-home)
                         turret.goToAngle(turret.getCurrentAngleDeg());
                         turretPositionCommandActive = true;
                     }
@@ -414,7 +402,7 @@ public class TeleOp_pedro_pidf_Incre extends OpMode {
                 }
 
                 case ODO_FACE_POINT: {
-                    turret.faceTarget(ODO_FACE_X, ODO_FACE_Y, follower.getPose());
+                    turret.faceTarget(ODO_FACE_X, ODO_FACE_Y, poseNow);
                     turretPositionCommandActive = true;
                     break;
                 }
@@ -431,227 +419,196 @@ public class TeleOp_pedro_pidf_Incre extends OpMode {
                 }
             }
         }
-
         turret.update();
+        secTurret.push((System.nanoTime() - t0) / 1e6);
 
-        // ===== SPINDEXER COMMAND (GO TO INTAKE, NOT rezero) =====
+        // ===== SPINDEXER COMMAND (GO TO INTAKE) =====
         boolean rehomeButton = gamepad1.right_stick_button;
         if (rehomeButton && !prevRehome) spindexer.homeToIntake();
         prevRehome = rehomeButton;
 
-        //manual shooter spinup
+        // ===== Manual shooter spinup (rb as toggle) =====
         boolean rb1 = gamepad1.right_bumper;
-        if (rb1 && !prevRB1) {
-            shooterManualHold = !shooterManualHold;
-        }
+        if (rb1 && !prevRB1) shooterManualHold = !shooterManualHold;
         prevRB1 = rb1;
 
+        // ===== BangBang toggle (lb) - won’t break compile if shooter doesn’t have field =====
+        boolean lb1 = gamepad1.left_bumper;
+        if (lb1 && !prevLB1) {
+            toggleStaticBooleanIfExists(ShooterSubsystemFF_dualMotor.class, "USE_BANGBANG");
+        }
+        prevLB1 = lb1;
+
         // ===== DRIVER2 PATTERN SELECT =====
-        boolean dUp2    = gamepad2.dpad_up;
+        boolean dUp2 = gamepad2.dpad_up;
         boolean dRight2 = gamepad2.dpad_right;
-        boolean dLeft2  = gamepad2.dpad_left;
-        boolean dDown2  = gamepad2.dpad_down;
+        boolean dLeft2 = gamepad2.dpad_left;
+        boolean dDown2 = gamepad2.dpad_down;
 
         if (dUp2 && !prev2Up) driverPatternTag = 23;
         if (dRight2 && !prev2Right) driverPatternTag = 22;
         if (dLeft2 && !prev2Left) driverPatternTag = 21;
         if (dDown2 && !prev2Down) driverPatternTag = 0;
 
-        prev2Up = dUp2;
-        prev2Right = dRight2;
-        prev2Left = dLeft2;
-        prev2Down = dDown2;
+        prev2Up = dUp2; prev2Right = dRight2; prev2Left = dLeft2; prev2Down = dDown2;
 
-        // ===== SPINDEXER UPDATE =====
-        spindexerIsFull = spindexer.update(telemetry, loader, yEdge, driverPatternTag);
+        // ===== SPINDEXER UPDATE (timed) =====
+        spindexer.setI2cAllowed(!shooter.isOn());
+        t0 = System.nanoTime();
+        spindexerIsFull = spindexer.update(null, loader, yEdge, driverPatternTag);
+        secSpindexer.push((System.nanoTime() - t0) / 1e6);
 
-        // Update loader after spindexer (spindexer may trigger loader.startCycle())
+        // ===== LOADER UPDATE (timed) =====
+        t0 = System.nanoTime();
         loader.updateLoader();
+        secLoader.push((System.nanoTime() - t0) / 1e6);
 
-        // Compute hasAnyBall locally from slots (since subsystem doesn't expose it)
+        // hasAnyBall from slots
         SpindexerSubsystem_Passive_State_new_Incremental.Ball[] slots = spindexer.getSlots();
         boolean hasAnyBall = false;
-        for (int i = 0; i < slots.length; i++) {
-            if (slots[i] != SpindexerSubsystem_Passive_State_new_Incremental.Ball.EMPTY) {
-                hasAnyBall = true;
-                break;
-            }
+        for (SpindexerSubsystem_Passive_State_new_Incremental.Ball b : slots) {
+            if (b != SpindexerSubsystem_Passive_State_new_Incremental.Ball.EMPTY) { hasAnyBall = true; break; }
         }
 
         // ===== Eject / shooter timing =====
         boolean ejecting = spindexer.isEjecting();
-        if (lastEjecting && !ejecting && !hasAnyBall) {
-            shooterSpinDownDeadline = now + 2000;
-        }
+        if (lastEjecting && !ejecting && !hasAnyBall) shooterSpinDownDeadline = nowMs + 2000;
         lastEjecting = ejecting;
 
         boolean wantShooter;
         boolean wantIntake;
 
         if (spindexerIsFull) {
-            wantShooter = true;
-            wantIntake  = false;
-        } else if (ejecting || now < shooterSpinDownDeadline) {
-            wantShooter = true;
-            wantIntake  = false;
+            wantShooter = true;  wantIntake = false;
+        } else if (ejecting || nowMs < shooterSpinDownDeadline) {
+            wantShooter = true;  wantIntake = false;
         } else {
-            wantShooter = false;
-            wantIntake  = true;
+            wantShooter = false; wantIntake = true;
         }
 
-        // Manual shooter spin-up override
         if (shooterManualHold) {
             wantShooter = true;
-            // optional: stop intake while manually spun up
-            // wantIntake = false;
+            // optional: wantIntake = false;
         }
-        
+
         shooterOn = wantShooter;
         intakeOn  = wantIntake;
 
-        // ===== SHOOTER UPDATE =====
+        // ===== SHOOTER UPDATE (timed) =====
+        t0 = System.nanoTime();
         shooter.update(
                 shooterOn,
                 gamepad1.dpad_up,
                 gamepad1.dpad_down,
                 fieldPos
         );
+        secShooter.push((System.nanoTime() - t0) / 1e6);
 
-        // ===== INTAKE UPDATE =====
+        // ===== INTAKE UPDATE (timed) =====
+        t0 = System.nanoTime();
         if (intakeOn) intake.startIntake();
         else intake.stopIntake();
-
+        secIntake.push((System.nanoTime() - t0) / 1e6);
 
         // ===== AUTOFIRE PULSE (shoot assist) =====
         if (shootAssistActive) {
-            // pose ready
-            boolean arrived = atPose(follower.getPose(), activeShootPose, 2.0, 6.0);
+            boolean arrived = atPose(poseNow, activeShootPose, 2.0, 6.0);
 
-            // rpm ready
-            double targetRpm  = shooter.getTargetRpm();
+            double targetRpm = shooter.getTargetRpm();
             double currentRpm = shooter.getCurrentRpmEstimate();
-            boolean rpmReady  = Math.abs(targetRpm - currentRpm) < 150;
+            boolean rpmReady = Math.abs(targetRpm - currentRpm) < 150;
 
-            // vision aimed
-            double tx = vision.getGoalTxDegOrNaN();
             double offset = (fieldPos == 0) ? AIM_OFFSET_NEAR_DEG : AIM_OFFSET_FAR_DEG;
+            boolean visionAimed = !Double.isNaN(txGoal) && Math.abs(TX_SIGN * (txGoal + offset)) <= TX_DEADBAND_DEG;
 
-            boolean visionAimed = !Double.isNaN(tx) &&
-                    Math.abs(TX_SIGN * (tx + offset)) <= TX_DEADBAND_DEG;
-
-            // Only allow autofire after tag acquired + tracking
             boolean turretReady = !waitingForTagAfterAssist
                     && (turretAimMode == TurretAimMode.VISION_TRACK)
                     && visionAimed;
 
-            if (postPathActionsDone && turretReady && arrived && rpmReady && now > autoFireCooldownUntil) {
+            if (postPathActionsDone && turretReady && arrived && rpmReady && nowMs > autoFireCooldownUntil) {
                 autoFirePulse = true;
-                autoFireCooldownUntil = now + 800;
+                autoFireCooldownUntil = nowMs + 800;
             }
         }
 
-
         // record pose
-        PoseStorage.lastPose = follower.getPose();
+        PoseStorage.lastPose = poseNow;
 
-        double targetRpm = shooter.getTargetRpm();
-        double curRpm    = shooter.getVelocityRpm();        // or getCurrentRpmEstimate()
-        double errRpm    = targetRpm - curRpm;
-
-//        double targetTps = shooter.getTargetTps();
-//        double velTps    = shooter.getVelocityTps();
-//        double errTps    = targetTps - velTps;
-
-// ---- Panels graphs/text ----
-        telemetryM.addData("shooter/target_rpm", targetRpm);
-        telemetryM.addData("shooter/rpm", curRpm);
-        telemetryM.addData("shooter/err_rpm", errRpm);
-
-//        telemetryM.addData("shooter/target_tps", targetTps);
-//        telemetryM.addData("shooter/vel_tps", velTps);
-//        telemetryM.addData("shooter/err_tps", errTps);
-
-        telemetryM.addData("shooter/power_cmd", shooter.getPowerCmd());
-        telemetryM.addData("shooter/ff", shooter.getFF());
-
-// sanity checks (so you can prove kv/ks are actually 0)
-        telemetryM.addData("shooter/kV", shooter.getKv());
-        telemetryM.addData("shooter/kS", shooter.getKs());
-        telemetryM.addData("shooter/isOn", shooter.isOn());
-        telemetryM.addData("shooterOnCmd", shooterOn);
-
-// ---- DS telemetry (optional) ----
-        telemetry.addData("Target RPM", "%.0f", targetRpm);
-        telemetry.addData("RPM", "%.0f", curRpm);
-        telemetry.addData("RPM Err", "%.0f", errRpm);
-        telemetry.addData("cmd(lastPowerCmd)", "%.3f", shooter.getPowerCmd());
-        telemetry.addData("ff", "%.3f", shooter.getFF());
-
-
-        // ===== TELEMETRY =====
-        boolean readyForIntake = !ejecting; // since subsystem doesn't expose isAutoRotating()
-
-        int estimatedIntakeSlot = estimateIntakeSlotFromAngle(spindexer.getCurrentAngleDeg());
-
-        telemetry.addData("Spd estIntakeSlot", estimatedIntakeSlot);
-        telemetry.addData("Spd readyForIntake", readyForIntake);
-        telemetry.addData("Spd full", spindexer.isFull());
-        telemetry.addData("Spd ejecting", spindexer.isEjecting());
-        telemetry.addData("Spd slot[0]", slots[0]);
-        telemetry.addData("Spd slot[1]", slots[1]);
-        telemetry.addData("Spd slot[2]", slots[2]);
-        telemetry.addData("Spd angle(enc)", "%.1f", spindexer.getCurrentAngleDeg());
-
-        double target = shooter.getTargetRpm();
-        double current = shooter.getCurrentRpmEstimate();
-        double error = target - current;
-
-        telemetry.addData("Shooter On", shooter.isOn());
-        telemetry.addData("Intake On", intakeOn);
-        telemetry.addData("Field Pos", (fieldPos == 0) ? "NEAR" : "FAR");
-        telemetry.addData("Target RPM", "%.0f", target);
-        telemetry.addData("Current RPM (est)", "%.0f", current);
-        telemetry.addData("RPM Error", "%.0f", error);
-        telemetry.addData("spindexer gameTag", spindexer.getGameTag());
-
-        telemetry.addData("Pattern Tag", driverPatternTag);
-        telemetry.addData("Pattern", patternStringForTag(driverPatternTag));
-
-//        telemetry.addData("Seen Tags", vision.getSeenTagIdsString());
-//        telemetry.addData("Goal tx", "%.2f", vision.getGoalTxDegOrNaN());
-
-        telemetryM.debug("position", follower.getPose());
-//        telemetryM.debug("velocity", follower.getVelocity());
-        telemetryM.debug("automatedDrive", automatedDrive);
-
-        telemetry.addData("TurretMode", turretAimMode);
-        telemetry.addData("TurretAngle", "%.1f", turret.getCurrentAngleDeg());
-        telemetry.addData("TurretTarget", "%.1f", turret.getTargetAngleDeg());
-        telemetryM.addData("Target RPM", targetRpm);
-        telemetryM.addData("RPM",  curRpm);
-        telemetryM.addData("RPM Err",  errRpm);
-
-        telemetry.addData("cmd(lastPowerCmd)", shooter.getPowerCmd());
-        telemetry.addData("ff", shooter.getFF());
-        telemetry.addData("vel(tps)", shooter.getVelocityTps());
-
-
-//        TelemetryPacket packet = new TelemetryPacket();
-//        packet.put("rpm", current);
-//        packet.put("target", target);
-//        packet.put("error", error);
-//        dashboard.sendTelemetryPacket(packet);
-
-        //spindexer.debugColorTelemetry(telemetry, now);
-
-        //telemetry.update();
-
-        long nowMs = System.currentTimeMillis();
-
+        // ===== TELEMETRY / PANELS (10Hz) =====
         if (nowMs - lastPanelsUpdateMs >= PANELS_PERIOD_MS) {
+            long tTel0 = System.nanoTime();
+
             lastPanelsUpdateMs = nowMs;
+
+            double targetRpm = shooter.getTargetRpm();
+            double curRpm = shooter.getCurrentRpmEstimate();
+            double errRpm = targetRpm - curRpm;
+
+            // Panels graphs
+            telemetryM.addData("loop/ms", loopLastMs);
+            telemetryM.addData("loop/hz", loopHz);
+            telemetryM.addData("loop/worst_ms", worstLoopMs);
+
+            telemetryM.addData("prof/follower_ms", secFollower.lastMs);
+            telemetryM.addData("prof/vision_ms", secVision.lastMs);
+            telemetryM.addData("prof/turret_ms", secTurret.lastMs);
+            telemetryM.addData("prof/spindexer_ms", secSpindexer.lastMs);
+            telemetryM.addData("prof/loader_ms", secLoader.lastMs);
+            telemetryM.addData("prof/shooter_ms", secShooter.lastMs);
+            telemetryM.addData("prof/intake_ms", secIntake.lastMs);
+
+            telemetryM.addData("prof/spindexer_max", secSpindexer.worstMs);
+            telemetryM.addData("prof/vision_max", secVision.worstMs);
+            telemetryM.addData("prof/follower_max", secFollower.worstMs);
+
+            telemetryM.addData("shooter/target_rpm", targetRpm);
+            telemetryM.addData("shooter/rpm", curRpm);
+            telemetryM.addData("shooter/err_rpm", errRpm);
+            telemetryM.addData("shooter/power_cmd", shooter.getPowerCmd());
+            telemetryM.addData("shooter/ff", shooter.getFF());
+            telemetryM.addData("shooter/isOn", shooter.isOn());
+
+            // DS telemetry (keep light — big telemetry can spike loop)
+            telemetry.clear();
+            telemetry.addData("Loop", "%dms (worst %d) | %.1fHz", (long) loopLastMs, worstLoopMs, loopHz);
+            telemetry.addData("Follower ms", "%.2f", secFollower.lastMs);
+            telemetry.addData("Vision ms", "%.2f", secVision.lastMs);
+            telemetry.addData("Turret ms", "%.2f", secTurret.lastMs);
+            telemetry.addData("Spindexer ms", "%.2f (max %.1f)", secSpindexer.lastMs, secSpindexer.worstMs);
+            telemetry.addData("Shooter ms", "%.2f", secShooter.lastMs);
+
+            telemetry.addData("Target RPM", "%.0f", targetRpm);
+            telemetry.addData("RPM(est)", "%.0f", curRpm);
+            telemetry.addData("Err", "%.0f", errRpm);
+            telemetry.addData("ShooterOn", shooterOn);
+            telemetry.addData("IntakeOn", intakeOn);
+            telemetry.addData("FieldPos", (fieldPos == 0) ? "NEAR" : "FAR");
+
+            telemetry.addData("Spd full", spindexer.isFull());
+            telemetry.addData("Spd ejecting", spindexer.isEjecting());
+            telemetry.addData("Slots", "%s %s %s", slots[0], slots[1], slots[2]);
+            telemetry.addData("TurretMode", turretAimMode);
+            telemetry.addData("TurretAngle", "%.1f", turret.getCurrentAngleDeg());
+            telemetry.addData("TurretTarget", "%.1f", turret.getTargetAngleDeg());
+
             telemetryM.update(telemetry);
             telemetry.update();
+
+            long tTel1 = System.nanoTime();
+            secTelemetry.push((tTel1 - tTel0) / 1e6);
+        }
+    }
+
+    // ===== Helpers =====
+
+    private static void toggleStaticBooleanIfExists(Class<?> clazz, String fieldName) {
+        try {
+            Field f = clazz.getDeclaredField(fieldName);
+            if (f.getType() != boolean.class) return;
+            boolean cur = f.getBoolean(null);
+            f.setBoolean(null, !cur);
+        } catch (Exception ignored) {
+            // field doesn't exist -> do nothing (keeps TeleOp compiling)
         }
     }
 
@@ -660,9 +617,7 @@ public class TeleOp_pedro_pidf_Incre extends OpMode {
                 .addPath(new Path(new BezierLine(follower::getPose, target)))
                 .setHeadingInterpolation(
                         HeadingInterpolator.linearFromPoint(
-                                follower::getHeading,
-                                target.getHeading(),
-                                0.8
+                                follower::getHeading, target.getHeading(), 0.8
                         )
                 )
                 .build();
@@ -670,15 +625,11 @@ public class TeleOp_pedro_pidf_Incre extends OpMode {
 
     private void startShootAssist(Pose target) {
         activeShootPose = target;
-
-        // Remember what the turret was doing before shoot assist
         turretAimModeBeforeAssist = turretAimMode;
 
-        // Optional: keep turret steady while driving (prevents tx chasing mid-drive)
+        // keep turret steady while driving
         turretAimMode = TurretAimMode.MANUAL_HOLD;
         turretPositionCommandActive = false;
-
-        assistVisionEnabled = false;
 
         follower.followPath(buildLineToPose(target));
         automatedDrive = true;
@@ -686,21 +637,16 @@ public class TeleOp_pedro_pidf_Incre extends OpMode {
         postPathActionsDone = false;
     }
 
-
     private void cancelShootAssist() {
         follower.startTeleopDrive();
         automatedDrive = false;
         shootAssistActive = false;
         postPathActionsDone = false;
-
         waitingForTagAfterAssist = false;
         tagStableCount = 0;
 
-        // Restore whatever mode you had before shoot assist
         turretAimMode = turretAimModeBeforeAssist;
-        assistVisionEnabled = false;
     }
-
 
     private static double wrapRad(double r) {
         while (r > Math.PI) r -= 2.0 * Math.PI;
@@ -712,30 +658,7 @@ public class TeleOp_pedro_pidf_Incre extends OpMode {
         double dx = cur.getX() - target.getX();
         double dy = cur.getY() - target.getY();
         double dist = Math.hypot(dx, dy);
-
         double dh = Math.toDegrees(Math.abs(wrapRad(cur.getHeading() - target.getHeading())));
         return dist <= posTolIn && dh <= headingTolDeg;
-    }
-
-    // ===== Helpers to replace missing spindexer methods =====
-
-    private static int estimateIntakeSlotFromAngle(double angleDeg0to360) {
-        // nearest of 0,120,240
-        double a = angleDeg0to360 % 360.0;
-        if (a < 0) a += 360.0;
-
-        int idx = (int) Math.round(a / 120.0) % 3;
-        if (idx < 0) idx += 3;
-        return idx;
-    }
-
-    private static String patternStringForTag(int tag) {
-        switch (tag) {
-            case 23: return "P-P-G";
-            case 22: return "P-G-P";
-            case 21: return "G-P-P";
-            case 0:  return "Fast (no pattern)";
-            default: return "Unknown(tag=" + tag + ")";
-        }
     }
 }

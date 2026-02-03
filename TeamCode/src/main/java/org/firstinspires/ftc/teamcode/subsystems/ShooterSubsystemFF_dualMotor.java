@@ -25,8 +25,8 @@ public class ShooterSubsystemFF_dualMotor {
     private static final double PHYSICAL_MAX_FLYWHEEL_RPM = PHYSICAL_MAX_MOTOR_RPM * MOTOR_TO_FLYWHEEL;
 
     // ===== HOOD SERVO CONSTANTS =====
-    private static final double HOOD_NEAR_POS = 0.92;
-    private static final double HOOD_FAR_POS  = 0.92;
+    private static final double HOOD_NEAR_POS = 0.3;
+    private static final double HOOD_FAR_POS  = 0.3;
 
     // =========================
     // PANELS TUNABLES (STATIC)
@@ -45,6 +45,47 @@ public class ShooterSubsystemFF_dualMotor {
 
     public static boolean TUNE_FORCE_ON = false;
     public static double  TUNE_FORCE_RPM = 3000.0;
+
+    // =========================
+    // PERF / CACHING TUNABLES
+    // =========================
+    public static boolean ENABLE_WRITE_CACHING = true;
+    public static double MOTOR_CACHE_TOLERANCE = 0.002; // power tolerance
+    public static double SERVO_CACHE_TOLERANCE = 0.001; // position tolerance
+
+    // Velocity smoothing (reduces PID pulsing)
+    public static boolean ENABLE_VEL_FILTER = true;
+    public static double  VEL_FILTER_ALPHA = 0.25; // 0..1, higher=less smoothing
+
+    // =========================
+    // BANG-BANG MODE
+    // =========================
+    /** Dashboard toggle: if true, bang-bang replaces PIDF. */
+    public static boolean TUNE_USE_BANGBANG = false;
+
+    /** Bang-bang: if |error| > this, go full power (fast spin-up). */
+    public static double BB_FULL_ON_ERR_RPM = 500.0;
+
+    /** Bang-bang hysteresis band around target (hold near FF). */
+    public static double BB_HYST_RPM = 80.0;
+
+    /** Bang-bang extra +/- power step around FF when outside hysteresis but not full-on. */
+    public static double BB_STEP_POWER = 0.12;
+
+    /** Clip final power to this max (still Range.clip to [-1..1]). */
+    public static double BB_MAX_POWER = 1.0;
+
+    // =========================
+    // LIGHT UPDATE CONTROL
+    // =========================
+    public static boolean LIGHT_ONLY_ON_CHANGE = true;
+    public static boolean LIGHT_RATE_LIMIT = true;
+    public static long LIGHT_PERIOD_MS = 50;
+
+    // =========================
+    // PROFILING
+    // =========================
+    public static boolean PROFILE = true;
 
     // ===== HARDWARE =====
     private final MotorEx motor1;
@@ -68,41 +109,69 @@ public class ShooterSubsystemFF_dualMotor {
     // ===== TUNABLES (INSTANCE COPIES) =====
     private double kP = 0.0, kI = 0.0, kD = 0.0, kV = 0.0, kS = 0.0;
 
-    // debug
+    // Debug / telemetry values
     private double lastTargetMotorTps = 0.0;
     private double lastVelMotorTps = 0.0;
     private double lastPowerCmd = 0.0;
     private double lastFF = 0.0;
-
     private double lastVelMotor1Tps = 0.0;
     private double lastVelMotor2Tps = 0.0;
 
+    // Filter state
+    private double velFilteredTps = 0.0;
+    private boolean velFilterInit = false;
+
+    // Command caching
+    private double lastPowerSent = 999.0;
+    private double lastHoodSent = 999.0;
+
+    // Light caching
+    private int lastLightColor = -999;
+    private long lastLightMs = 0;
+
+    // Bang-bang runtime toggle (so you can bind to a gamepad toggle)
+    private boolean bangbangEnabledRuntime = false;
+    public void setBangBangEnabled(boolean enabled) { bangbangEnabledRuntime = enabled; }
+    public boolean isBangBangEnabled() { return (TUNE_USE_BANGBANG || bangbangEnabledRuntime); }
+
+    // Profiling breakdown (ms)
+    private double profTotalMs = 0;
+    private double profSenseMs = 0;
+    private double profComputeMs = 0;
+    private double profWriteMs = 0;
+
+    public double getUpdateMs() { return profTotalMs; }
+    public double getUpdateSenseMs() { return profSenseMs; }
+    public double getUpdateComputeMs() { return profComputeMs; }
+    public double getUpdateWriteMs() { return profWriteMs; }
+
+
     public ShooterSubsystemFF_dualMotor(HardwareMap hardwareMap) {
-        // If you want SolversLib to “know” CPR/RPM, use the (cpr, rpm) constructor
         motor1 = new MotorEx(hardwareMap, "motor_one", TICKS_PER_REV, PHYSICAL_MAX_MOTOR_RPM);
         motor2 = new MotorEx(hardwareMap, "turretMotor", TICKS_PER_REV, PHYSICAL_MAX_MOTOR_RPM);
 
         hoodServo = new ServoEx(hardwareMap, "hoodServo");
-
         light = new LightSubsystem(hardwareMap);
 
         initMotor(motor1);
         initMotor(motor2);
 
-        // In SolversLib, direction is typically handled via inversion:
-        motor1.setInverted(true);   // equivalent to REVERSE
-        motor2.setInverted(false);  // equivalent to FORWARD
+        motor1.setInverted(true);
+        motor2.setInverted(false);
 
-        // Optional write-caching: only helps if you spam nearly-identical outputs
-        // motor1.setCachingTolerance(0.0005);
-        // motor2.setCachingTolerance(0.0005);
-        // hoodServo.setCachingTolerance(0.001);
+        if (ENABLE_WRITE_CACHING) {
+            motor1.setCachingTolerance(MOTOR_CACHE_TOLERANCE);
+            motor2.setCachingTolerance(MOTOR_CACHE_TOLERANCE);
+            hoodServo.setCachingTolerance(SERVO_CACHE_TOLERANCE);
+        }
 
         syncFromTunables();
         controller = new PIDFController(kP, kI, kD, 0.0);
 
         fieldPos = 0;
-        hoodServo.set(TUNE_HOOD_NEAR_POS); // <-- FIX: use set(), not setPosition()
+        setHoodIfChanged(TUNE_HOOD_NEAR_POS);
+        setMotorsIfChanged(0.0);
+        setLightSmart(1, System.currentTimeMillis(), true);
     }
 
     private void initMotor(MotorEx m) {
@@ -143,14 +212,17 @@ public class ShooterSubsystemFF_dualMotor {
                        boolean rpmDownButton,
                        int fieldPosInput) {
 
+        final long t0 = PROFILE ? System.nanoTime() : 0;
+        final long nowMs = System.currentTimeMillis();
+
         syncFromTunables();
 
-        // === FIELD POS / HOOD ===
+        // === FIELD POS / HOOD (ONLY WRITE IF CHANGED) ===
         int newFieldPos = (fieldPosInput == 1) ? 1 : 0;
-        if (newFieldPos != fieldPos) {
-            fieldPos = newFieldPos;
-            hoodServo.set(fieldPos == 1 ? TUNE_HOOD_FAR_POS : TUNE_HOOD_NEAR_POS); // <-- set()
-        }
+        if (newFieldPos != fieldPos) fieldPos = newFieldPos;
+
+        double hoodTarget = (fieldPos == 1) ? TUNE_HOOD_FAR_POS : TUNE_HOOD_NEAR_POS;
+        setHoodIfChanged(hoodTarget);
 
         // === RPM ADJUST (edge) ===
         if (rpmUpButton && !prevRpmUp) {
@@ -170,50 +242,141 @@ public class ShooterSubsystemFF_dualMotor {
         boolean on = shooterOnCommand || TUNE_FORCE_ON;
         isOn = on;
 
-
         double targetFlywheelRpm = TUNE_FORCE_ON ? TUNE_FORCE_RPM : getTargetRpm();
-        double targetMotorRpm = (isOn && targetFlywheelRpm > 0) ? flywheelRpmToMotorRpm(targetFlywheelRpm) : 0.0;
-        double targetMotorTps = (targetMotorRpm > 0) ? motorRpmToTicksPerSec(targetMotorRpm) : 0.0;
 
-        // Read both motor velocities (ticks/sec)
+        // EARLY EXIT: if off or target ~0, don’t read velocities, don’t do PID, don’t spam writes
+        if (!isOn || targetFlywheelRpm <= 1.0) {
+            final long tWrite0 = PROFILE ? System.nanoTime() : 0;
+            setMotorsIfChanged(0.0);
+            lastPowerCmd = 0.0;
+            lastFF = 0.0;
+            velFilterInit = false;
+            setLightSmart(1, nowMs, false);
+            final long tWrite1 = PROFILE ? System.nanoTime() : 0;
+
+            if (PROFILE) {
+                long tEnd = System.nanoTime();
+                profTotalMs = (tEnd - t0) / 1e6;
+                profSenseMs = 0.0;
+                profComputeMs = 0.0;
+                profWriteMs = (tWrite1 - tWrite0) / 1e6;
+            }
+            return;
+        }
+
+        // Compute target in motor ticks/sec
+        double targetMotorRpm = flywheelRpmToMotorRpm(targetFlywheelRpm);
+        double targetMotorTps = motorRpmToTicksPerSec(targetMotorRpm);
+
+        lastTargetMotorTps = targetMotorTps;
+
+        // === SENSOR READS (velocity) ===
+        final long tSense0 = PROFILE ? System.nanoTime() : 0;
         double v1 = motor1.getVelocity();
         double v2 = motor2.getVelocity();
+        final long tSense1 = PROFILE ? System.nanoTime() : 0;
+
         lastVelMotor1Tps = v1;
         lastVelMotor2Tps = v2;
 
         double velMotorTps = 0.5 * (v1 + v2);
-        double errorTps = targetMotorTps - velMotorTps;
 
-        lastTargetMotorTps = targetMotorTps;
-        lastVelMotorTps = velMotorTps;
-
-        if (targetMotorTps <= 1.0) {
-            motor1.set(0.0);
-            motor2.set(0.0);
-            lastPowerCmd = 0.0;
-            lastFF = 0.0;
-            light.setColor(1);
-            return;
+        // Optional filtering
+        double velUsedTps;
+        if (ENABLE_VEL_FILTER) {
+            if (!velFilterInit) {
+                velFilteredTps = velMotorTps;
+                velFilterInit = true;
+            } else {
+                velFilteredTps = (VEL_FILTER_ALPHA * velMotorTps) + ((1.0 - VEL_FILTER_ALPHA) * velFilteredTps);
+            }
+            velUsedTps = velFilteredTps;
+        } else {
+            velUsedTps = velMotorTps;
         }
+        lastVelMotorTps = velUsedTps;
 
-        double ff = (kV * targetMotorTps) + kS;
+        // === CONTROL COMPUTE ===
+        final long tComp0 = PROFILE ? System.nanoTime() : 0;
+
+        double errorTps = targetMotorTps - velUsedTps;
+
+        double ff = (kV * targetMotorTps) + kS;  // feedforward power
         lastFF = ff;
 
-        controller.setPIDF(kP, kI, kD, ff);
+        double power;
+        if (isBangBangEnabled()) {
+            // Bang-bang in RPM domain for intuitive tuning
+            double curMotorRpm = ticksPerSecToMotorRpm(velUsedTps);
+            double curFlywheelRpm = motorRpmToFlywheelRpm(curMotorRpm);
+            double errFlywheelRpm = targetFlywheelRpm - curFlywheelRpm;
 
-        double power = controller.calculate(errorTps);
+            if (Math.abs(errFlywheelRpm) > BB_FULL_ON_ERR_RPM) {
+                power = 1.0; // full power spin-up
+            } else if (Math.abs(errFlywheelRpm) <= BB_HYST_RPM) {
+                power = ff; // hold near FF inside hysteresis
+            } else {
+                // outside hysteresis: nudge around FF
+                power = ff + Math.signum(errFlywheelRpm) * BB_STEP_POWER;
+            }
+
+            power = Range.clip(power, -BB_MAX_POWER, BB_MAX_POWER);
+        } else {
+            controller.setPIDF(kP, kI, kD, ff);
+            power = controller.calculate(errorTps);
+        }
+
         power = Range.clip(power, -1.0, 1.0);
-
-        motor1.set(power);
-        motor2.set(power);
         lastPowerCmd = power;
 
+        final long tComp1 = PROFILE ? System.nanoTime() : 0;
+
+        // === WRITES (motors + light) ===
+        final long tWrite0 = PROFILE ? System.nanoTime() : 0;
+        setMotorsIfChanged(power);
+
         // Light logic based on flywheel rpm error
-        double curMotorRpm = ticksPerSecToMotorRpm(velMotorTps);
+        double curMotorRpm = ticksPerSecToMotorRpm(velUsedTps);
         double curFlywheelRpm = motorRpmToFlywheelRpm(curMotorRpm);
         double errFlywheelRpm = targetFlywheelRpm - curFlywheelRpm;
+        setLightSmart(Math.abs(errFlywheelRpm) < 150 ? 3 : 2, nowMs, false);
 
-        light.setColor(Math.abs(errFlywheelRpm) < 150 ? 3 : 2);
+        final long tWrite1 = PROFILE ? System.nanoTime() : 0;
+
+        if (PROFILE) {
+            long tEnd = System.nanoTime();
+            profTotalMs = (tEnd - t0) / 1e6;
+            profSenseMs = (tSense1 - tSense0) / 1e6;
+            profComputeMs = (tComp1 - tComp0) / 1e6;
+            profWriteMs = (tWrite1 - tWrite0) / 1e6;
+        }
+    }
+
+    // ===== SMART WRITES =====
+
+    private void setMotorsIfChanged(double pwr) {
+        // If SolversLib caching tolerance is enabled, this helps already,
+        // but we also avoid calling set() if unchanged to reduce traffic further.
+        if (Math.abs(pwr - lastPowerSent) < MOTOR_CACHE_TOLERANCE) return;
+        motor1.set(pwr);
+        motor2.set(pwr);
+        lastPowerSent = pwr;
+    }
+
+    private void setHoodIfChanged(double pos) {
+        if (Math.abs(pos - lastHoodSent) < SERVO_CACHE_TOLERANCE) return;
+        hoodServo.set(pos);
+        lastHoodSent = pos;
+    }
+
+    private void setLightSmart(int color, long nowMs, boolean force) {
+        if (!force) {
+            if (LIGHT_RATE_LIMIT && (nowMs - lastLightMs) < LIGHT_PERIOD_MS) return;
+            if (LIGHT_ONLY_ON_CHANGE && color == lastLightColor) return;
+        }
+        light.setColor(color);
+        lastLightColor = color;
+        lastLightMs = nowMs;
     }
 
     // ===== GETTERS =====
@@ -236,32 +399,24 @@ public class ShooterSubsystemFF_dualMotor {
 
     public void stop() {
         isOn = false;
-        motor1.set(0.0);
-        motor2.set(0.0);
-        light.setColor(1);
+        setMotorsIfChanged(0.0);
+        setLightSmart(1, System.currentTimeMillis(), true);
+        velFilterInit = false;
     }
 
-    // Returns the SAME target the controller is actually using (flywheel RPM)
     public double getActiveTargetRpm() {
         return TUNE_FORCE_ON ? TUNE_FORCE_RPM : getTargetRpm();
     }
 
-    // Returns FLYWHEEL rpm estimate using the cached last velocity from update()
     public double getCurrentRpmEstimate() {
-        // lastVelMotorTps is motor-domain ticks/sec (avg of both motors)
         double motorRpm = ticksPerSecToMotorRpm(lastVelMotorTps);
         return motorRpmToFlywheelRpm(motorRpm);
     }
 
-    // Flywheel RPM error = target - current
     public double getErrorRpm() {
         return getActiveTargetRpm() - getCurrentRpmEstimate();
     }
 
     public double getKv() { return kV; }
     public double getKs() { return kS; }
-    public double getTargetTps() { return lastTargetTps; }
-    public double getVelocityTps() { return lastVelTps; }
-    private double lastTargetTps = 0.0;
-    private double lastVelTps = 0.0;
 }
