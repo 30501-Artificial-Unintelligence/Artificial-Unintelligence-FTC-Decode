@@ -30,6 +30,7 @@ import org.firstinspires.ftc.teamcode.subsystems.VisionSubsystem;
 
 import java.util.function.Supplier;
 import org.firstinspires.ftc.teamcode.subsystems.util.BulkCacheManager;
+import org.firstinspires.ftc.teamcode.subsystems.util.MotorMonitor;
 
 @Configurable
 @TeleOp(name = "TeleOp with pedro and pidf _ incremental", group = "Test")
@@ -56,6 +57,7 @@ public class TeleOp_pedro_pidf_Incre extends OpMode {
 
     // ===== DASHBOARD =====
     private FtcDashboard dashboard;
+    private MotorMonitor monitor;
 
     // ===== STATE VARIABLES =====
     private boolean prev2a = false;
@@ -184,6 +186,9 @@ public class TeleOp_pedro_pidf_Incre extends OpMode {
 
         dashboard = FtcDashboard.getInstance();
         telemetry = new MultipleTelemetry(telemetry, dashboard.getTelemetry());
+
+        MotorMonitor monitor = new MotorMonitor(hardwareMap, telemetry, 50,
+                   "FrontLeft","BackLeft","FrontRight","BackRight","spindexerMotor","intakeMotor","motor_one","turretMotor");
 
         telemetry.addLine("TeleOp with Pedro + Shooter PIDF (Incremental)");
         telemetry.update();
@@ -554,6 +559,8 @@ public class TeleOp_pedro_pidf_Incre extends OpMode {
 
         // record pose
         PoseStorage.lastPose = follower.getPose();
+
+        monitor.update();
 
         double targetRpm = shooter.getTargetRpm();
         double curRpm    = shooter.getVelocityRpm();        // or getCurrentRpmEstimate()
