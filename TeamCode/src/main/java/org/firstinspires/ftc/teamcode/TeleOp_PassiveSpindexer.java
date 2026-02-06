@@ -253,7 +253,7 @@ public class TeleOp_PassiveSpindexer extends OpMode {
         telemetry.addData("SpTicks", t);
         telemetry.addData("dTicks", dt);
         telemetry.addData("SpAngle", "%.1f", spindexer.getCurrentAngleDeg());
-        telemetry.addData("SpErrToTarget", "%.1f", spindexer.getAngleErrorToTargetDeg());
+        //telemetry.addData("SpErrToTarget", "%.1f", spindexer.getAngleErrorToTargetDeg());
         double pReq = spindexer.dbgLastRequestedPower();
         double pApp = spindexer.dbgLastAppliedPower();
 

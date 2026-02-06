@@ -119,7 +119,7 @@ public class MotorMonitor {
             telemetry.addLine(e.name + ": " + sb);
         }
 
-        telemetry.update();
+        //telemetry.update();
     }
 
     private double getBatteryVoltage() {

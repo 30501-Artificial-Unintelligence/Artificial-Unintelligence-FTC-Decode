@@ -27,6 +27,7 @@ import org.firstinspires.ftc.teamcode.subsystems.SpindexerSubsystem_State_new;
 import org.firstinspires.ftc.teamcode.subsystems.SpindexerSubsystem_State_new_Incremental;
 import org.firstinspires.ftc.teamcode.subsystems.TurretSubsystemIncremental;
 import org.firstinspires.ftc.teamcode.subsystems.VisionSubsystem;
+import org.firstinspires.ftc.teamcode.subsystems.util.SubsystemProfiler;
 
 import java.util.function.Supplier;
 
@@ -127,6 +128,7 @@ public class TeleOp_pedro_pidf_Incre_blue extends OpMode {
 
     private long lastPanelsUpdateMs = 0;
     private static final long PANELS_PERIOD_MS = 100; // 10 Hz
+    private final SubsystemProfiler prof = new SubsystemProfiler();
 
 
     @Override
@@ -172,6 +174,20 @@ public class TeleOp_pedro_pidf_Incre_blue extends OpMode {
         loopTimer.start();      // prime the timer so the first loop has a start()
         loopTimerPrimed = true;
         worstMs = 0;
+        prof.register(
+                "bulk",
+                "follower",
+                "draw",
+                "turret",
+                "vision",
+                "spindexer",
+                "loader",
+                "shooter",
+                "intake",
+                "telemetry_build",
+                "telemetry_send"
+        );
+
 
     }
 
@@ -189,6 +205,8 @@ public class TeleOp_pedro_pidf_Incre_blue extends OpMode {
 
     @Override
     public void loop() {
+        prof.loopStart();
+
         long now = System.currentTimeMillis();
 
 //        if (loopTimerPrimed) {
@@ -219,13 +237,16 @@ public class TeleOp_pedro_pidf_Incre_blue extends OpMode {
 
 // restart timer for next loop interval
         //loopTimer.start();
-
+        prof.start("follower");
         // ===== UPDATE PEDRO FOLLOWER =====
         follower.update();
         //telemetryM.update();
+        prof.start("follower");
 
+        prof.start("draw");
         Drawing.drawRobot(follower.getPose());
         Drawing.sendPacket();
+        prof.start("draw");
 
         // ===== DRIVETRAIN =====
         double leftX  = gamepad2.left_stick_x;
@@ -331,6 +352,7 @@ public class TeleOp_pedro_pidf_Incre_blue extends OpMode {
         double stickX = gamepad1.right_stick_x;
         boolean manualActive = Math.abs(stickX) > 0.05;
 
+        prof.start("turret");
         if (manualActive) {
             turretAimMode = TurretAimMode.MANUAL_HOLD;
             turretPositionCommandActive = false;
@@ -382,6 +404,7 @@ public class TeleOp_pedro_pidf_Incre_blue extends OpMode {
         }
 
         turret.update();
+        prof.end("turret");
 
         // ===== SPINDEXER COMMAND (GO TO INTAKE, NOT rezero) =====
         boolean rehomeButton = gamepad1.right_stick_button;

@@ -20,11 +20,7 @@ import org.firstinspires.ftc.robotcore.external.navigation.DistanceUnit;
  *
  * Mechanism note:
  * - You park "past" preshoot (staging) via SAFE CW, then come back to preshoot via CCW
- *   so the rod can dangle down before the 720° CCW shoot.
- *
- * Compatibility:
- * - Keeps update(...) signature and common getters used by old TeleOps/Autos.
- * - Keeps slots[] array (0/1/2) representing POCKETS in the wheel frame (slot0 at intake when angle=0).
+ *   so the rod can dangle down before the shoot.
  */
 @com.bylazar.configurables.annotations.Configurable
 public class SpindexerSubsystem_Passive_State_new_Incremental {
@@ -41,7 +37,6 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
     public static boolean REVERSE_MOTOR = true;
 
     // ===== OLD incremental PID defaults =====
-    // (Used for both MOVE and HOLD; HOLD is limited by HOLD_MAX_POWER.)
     public static double kP = 0.008;
     public static double kI = 0.0;
     public static double kD = 0.0;
@@ -64,6 +59,31 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
     // Optional throttling (0 = no throttle; read as fast as loop runs)
     public static long SLOT0_I2C_PERIOD_MS = 0;
 
+    // ===== IMPORTANT: allow shooting even if slots are empty (sensors unplugged) =====
+    public static boolean ALLOW_SHOOT_WHEN_SLOTS_EMPTY = true;
+
+    // ===== Shooting mode =====
+    // false = original "shoot all" (open-loop 1080deg)
+    // true  = indexed (120deg per shot), repeated ONE_BY_ONE_SHOTS_PER_SEQUENCE times
+    public static boolean SHOOT_ONE_BY_ONE = false;
+
+    // In one-by-one mode, how many indexed shots happen per Y press.
+    // Set to 1 for single-shot mode, 3 to shoot all.
+    public static int ONE_BY_ONE_SHOTS_PER_SEQUENCE = 3;
+
+    // Your pocket spacing:
+    public static double ONE_BY_ONE_STEP_DEG = 120.0;
+
+    // Per-shot power profile (similar to your high/low)
+    public static double ONE_BY_ONE_POWER_HIGH = 1.0;
+    public static double ONE_BY_ONE_POWER_LOW  = 0.9;
+    public static long   ONE_BY_ONE_HIGH_MS    = 180;
+    public static long   ONE_BY_ONE_DWELL_MS   = 120;   // pause between shots
+    public static long   ONE_BY_ONE_TIMEOUT_MS = 3500;  // total sequence timeout
+
+    // If true, after a one-by-one sequence finishes, return to intake like normal.
+    // If false, stay at READY (preshoot) after finishing sequence.
+    public static boolean ONE_BY_ONE_RETURN_TO_INTAKE = true;
 
     // ===== Panels slot simulation / override (for testing without Brushlands) =====
     public static boolean USE_PANELS_SLOT_OVERRIDE = false;
@@ -88,7 +108,7 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
     }
 
     // Motor encoder
-    private static final double TICKS_PER_REV = 4000.0; // goBILDA 435rpm YJ integrated encoder or elc V2
+    private static final double TICKS_PER_REV = 384.5;
     private static final double DEG_PER_TICK = 360.0 / TICKS_PER_REV;
 
     // Geometry (wheel-frame pockets)
@@ -96,8 +116,8 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
     private static final double DEGREES_PER_SLOT = 120.0;
 
     // World angles (by your convention)
-    public static double INTAKE_ANGLE_DEG   = 0.0;   // slot0 at intake when wheel angle = 0
-    public static double PRESHOOT_ANGLE_DEG = 200.0; // preshoot
+    public static double INTAKE_ANGLE_DEG   = 0.0;
+    public static double PRESHOOT_ANGLE_DEG = 200.0;
     /** "Staging" is defined as PRESHOOT + GO_PAST (CW safe). Example: GO_PAST=60 -> 240 staging. */
     public static double GO_PAST_ANGLE_DEG  = 40.0;
 
@@ -115,14 +135,13 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
     public static double MOVE_MAX_POWER = 0.55;
     public static double MOVE_DONE_TOL_DEG = 2.0;
 
-    // If we overshoot while doing a "preferred direction" move, allow a small correction
-    // instead of wrapping 350°.
+    // If we overshoot while doing a "preferred direction" move, allow a small correction instead of wrapping 350°.
     public static double OVERSHOOT_CORRECT_MAX_DEG = 60.0;
 
     // Hold control
     public static double HOLD_MAX_POWER = 0.30;
 
-    // Shooting (open-loop, encoder-distance tracked)
+    // Shooting (open-loop, encoder-distance tracked) - "shoot all" mode
     public static double SHOOT_DEG = 1080.0;        // 3 revs
     public static double SHOOT_POWER_HIGH = 1.0;
     public static double SHOOT_POWER_LOW  = 0.9;
@@ -133,11 +152,14 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
     // -1 means no override; else 0/21/22/23
     public static int patternTagOverride = -1;
 
+    // Persist throttling (prevents per-loop allocations + GC spikes)
+    public static long PERSIST_PERIOD_MS = 250;
+
     // ===== DEBUG =====
-    private double dbgLastRequestedPower = 0.0; // "angle-space" request before REVERSE
-    private double dbgLastAppliedPower   = 0.0; // actual motor.setPower value after REVERSE+clip
-    private double dbgLastErrShortestDeg = 0.0; // shortest-path error
-    private double dbgLastErrUsedDeg     = 0.0; // error after "prefer CW/CCW" logic
+    private double dbgLastRequestedPower = 0.0;
+    private double dbgLastAppliedPower   = 0.0;
+    private double dbgLastErrShortestDeg = 0.0;
+    private double dbgLastErrUsedDeg     = 0.0;
 
     public double dbgLastRequestedPower() { return dbgLastRequestedPower; }
     public double dbgLastAppliedPower()   { return dbgLastAppliedPower; }
@@ -156,13 +178,9 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
     // ===== SLOT MODEL =========
     // =========================
     public enum Ball { EMPTY, GREEN, PURPLE, UNKNOWN }
-
     private enum RawColor { RED, GREEN, PURPLE }
 
     // Provided by you (CCW eject order):
-    // start slot0 => 0,2,1
-    // start slot1 => 1,0,2
-    // start slot2 => 2,1,0
     private static final int[][] EJECT_ORDER = new int[][]{
             {0, 2, 1},
             {1, 0, 2},
@@ -199,7 +217,7 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
     // =========================
     // ===== ANGLE / ZERO =======
     // =========================
-    private int zeroTicks = 0;          // raw motor ticks corresponding to wheel angle = 0 (slot0 at intake)
+    private int zeroTicks = 0;
     private double targetAngleDeg = 0.0;
 
     // Persist across opmodes in same RC session
@@ -208,7 +226,7 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
         static Double  targetAngleDeg = null;
         static Integer gameTag = null;
         static int[]   slotsEnc = null;
-        static Boolean reverseMotor = null; // detect flipping between runs
+        static Boolean reverseMotor = null;
     }
 
     // =========================
@@ -246,6 +264,16 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
     private int shootLastTicks = 0;
     private double shootMovedDeg = 0.0;
 
+    // One-by-one shooting tracking
+    private enum StepPhase { MOVING, DWELL }
+    private StepPhase stepPhase = StepPhase.MOVING;
+    private int shotsRemaining = 0;
+    private int shotsDoneThisSeq = 0;
+    private long stepStartMs = 0;
+    private long dwellStartMs = 0;
+    private int stepLastTicks = 0;
+    private double stepMovedDeg = 0.0;
+
     // =========================
     // ===== PID STATE ==========
     // =========================
@@ -267,10 +295,7 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
 
     // TeleOp can set this each loop (ex: disable I2C while shooter is running)
     private boolean i2cAllowed = true;
-
-    public void setI2cAllowed(boolean allowed) {
-        this.i2cAllowed = allowed;
-    }
+    public void setI2cAllowed(boolean allowed) { this.i2cAllowed = allowed; }
 
     // slot0 cached frame + optional throttling time
     private long slot0LastI2cMs = 0;
@@ -283,6 +308,24 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
 
     private Slot0Frame slot0CachedFrame = new Slot0Frame(false, Ball.EMPTY);
 
+    // =========================
+    // ===== PERF TIMING ========
+    // =========================
+    private double updateMs = 0.0;
+    private double updateMsSense = 0.0;
+    private double updateMsHw = 0.0;      // slot0 I2C reads only
+    private double updateMsMotion = 0.0;
+    private double updateMsPersist = 0.0;
+
+    public double getUpdateMs() { return updateMs; }
+    public double getUpdateMsSense() { return updateMsSense; }
+    public double getUpdateMsHw() { return updateMsHw; }
+    public double getUpdateMsMotion() { return updateMsMotion; }
+    public double getUpdateMsPersist() { return updateMsPersist; }
+
+    // Persist throttling / dirty tracking
+    private long lastPersistMs = 0;
+    private boolean persistDirty = true;
 
     // =========================
     // ===== CONSTRUCTOR ========
@@ -332,11 +375,9 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
                 for (int i = 0; i < SLOT_COUNT; i++) slots[i] = decodeSlot(SpindexerOpModeStorage.slotsEnc[i]);
             }
         } else {
-            // First run: assume current wheel position is INTAKE (slot0 at intake now)
             homeSlot0AtIntakeHere();
         }
 
-        // If user flips REVERSE_MOTOR between runs, stored zero becomes ambiguous.
         if (SpindexerOpModeStorage.reverseMotor != null && SpindexerOpModeStorage.reverseMotor != REVERSE_MOTOR) {
             homeSlot0AtIntakeHere();
         }
@@ -348,9 +389,19 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
         SpindexerOpModeStorage.gameTag = gameTag;
         SpindexerOpModeStorage.reverseMotor = REVERSE_MOTOR;
 
-        int[] enc = new int[SLOT_COUNT];
-        for (int i = 0; i < SLOT_COUNT; i++) enc[i] = encodeSlot(slots[i]);
-        SpindexerOpModeStorage.slotsEnc = enc;
+        if (SpindexerOpModeStorage.slotsEnc == null || SpindexerOpModeStorage.slotsEnc.length != SLOT_COUNT) {
+            SpindexerOpModeStorage.slotsEnc = new int[SLOT_COUNT];
+        }
+        for (int i = 0; i < SLOT_COUNT; i++) {
+            SpindexerOpModeStorage.slotsEnc[i] = encodeSlot(slots[i]);
+        }
+    }
+
+    private void persistMaybe(long nowMs) {
+        if (!persistDirty && (nowMs - lastPersistMs) < PERSIST_PERIOD_MS) return;
+        lastPersistMs = nowMs;
+        persistDirty = false;
+        persistToStorage();
     }
 
     private int encodeSlot(Ball b) {
@@ -368,7 +419,7 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
     }
 
     // =========================
-    // ===== PUBLIC API (compat)
+    // ===== PUBLIC API =========
     // =========================
     public Ball[] getSlots() { return slots; }
 
@@ -382,22 +433,12 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
         return true;
     }
 
+
+
     public boolean isEjecting() { return ejecting; }
 
     public int getGameTag() { return gameTag; }
-
-    public void setGameTag(int tag) { this.gameTag = tag; }
-
-    public String getGamePattern() {
-        Ball[] p = getPatternForTag(gameTag);
-        if (p == null) return "Fast (no pattern, tag=" + gameTag + ")";
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < p.length; i++) {
-            if (i > 0) sb.append("-");
-            sb.append(p[i] == Ball.PURPLE ? "P" : (p[i] == Ball.GREEN ? "G" : "?"));
-        }
-        return sb.toString();
-    }
+    public void setGameTag(int tag) { this.gameTag = tag; persistDirty = true; }
 
     /** Same name as before; now it simply commands RETURN to intake (0°). */
     public void homeToIntake() {
@@ -405,7 +446,7 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
         ejecting = false;
         state = State.RETURNING_CW;
         targetAngleDeg = normalizeAngle(INTAKE_ANGLE_DEG);
-        // PID reset on new state will happen in update()
+        persistDirty = true;
     }
 
     /** Hard re-zero: declare current position is intake (slot0 at intake). */
@@ -418,15 +459,8 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
         slot0NeedsReread = true;
 
         resetDrivePID();
-        persistToStorage();
-    }
-
-    /** Optional compat: "Load" in old code was 180; here treat as preshoot hold. */
-    public void homeSlot0AtLoadHere() {
-        targetAngleDeg = normalizeAngle(PRESHOOT_ANGLE_DEG);
-        state = State.IDLE;
-        resetDrivePID();
-        persistToStorage();
+        persistDirty = true;
+        persistToStorage(); // immediate
     }
 
     public int getEncoder() { return motor.getCurrentPosition(); }
@@ -437,63 +471,62 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
         return ticksToAngle(motor.getCurrentPosition());
     }
 
-    /** Signed smallest-path error (target - current) in degrees in [-180,180]. */
-    public double getAngleErrorToTargetDeg() {
-        return smallestAngleDiff(targetAngleDeg, getCurrentAngleDeg());
-    }
-
     public boolean isAutoRotating() {
         return state == State.POSITION_TO_PARK_CW
                 || state == State.POSITION_TO_PRESHOOT_CCW
                 || state == State.RETURNING_CW;
     }
 
-    public int getIntakeIndex() { return 0; } // pocket index at intake when aligned (wheel frame)
+    // =========================
+// ===== SLOT PRESET API ====
+// =========================
 
+    /**
+     * Preloads the internal slot model (useful for preloads / testing).
+     * Order is POCKETS in wheel frame:
+     *  slots[0] = pocket that is at intake when angle=0
+     *  slots[1] = next pocket (120 deg)
+     *  slots[2] = next pocket (240 deg)
+     *
+     * Pass null to mean EMPTY.
+     */
     public void presetSlots(Ball s0, Ball s1, Ball s2) {
         slots[0] = (s0 == null) ? Ball.EMPTY : s0;
         slots[1] = (s1 == null) ? Ball.EMPTY : s1;
         slots[2] = (s2 == null) ? Ball.EMPTY : s2;
+
+        // When we manually preset, treat sensors as "needs reread" so we don't immediately overwrite
+        // your preload if you're not aligned / not sensing.
+        clearAllSensingCounters();
+        slot0NeedsReread = true;
+
+        // Persist across opmodes in same RC session (your class already has this method)
         persistToStorage();
     }
 
-    public void forceIntakeSlotGreen(Telemetry telemetry) {
-        if (slots[0] == Ball.EMPTY) slots[0] = Ball.GREEN;
-        if (telemetry != null) telemetry.addData("Force", "slot0=GREEN");
+    /** Convenience: set all three pockets to the same value. */
+    public void presetAll(Ball b) {
+        presetSlots(b, b, b);
     }
 
-    public void forceIntakeSlotPurple(Telemetry telemetry) {
-        if (slots[0] == Ball.EMPTY) slots[0] = Ball.PURPLE;
-        if (telemetry != null) telemetry.addData("Force", "slot0=PURPLE");
+    /** Convenience: empty everything. */
+    public void clearSlots() {
+        presetSlots(Ball.EMPTY, Ball.EMPTY, Ball.EMPTY);
     }
 
-    public void debugAbsAngle(Telemetry telemetry) {
-        if (telemetry == null) return;
-        telemetry.addData("Spd/ABS", "disabled (incremental)");
-        telemetry.addData("Spd/zeroTicks", zeroTicks);
-        telemetry.addData("Spd/reverse", REVERSE_MOTOR);
-    }
 
     // =========================
     // ===== MAIN UPDATE ========
     // =========================
-    /**
-     * Call every loop.
-     *
-     * @param telemetry DS telemetry
-     * @param loader (unused for passive mode; kept for signature compatibility)
-     * @param yEdge shoot command edge
-     * @param patternTagOverrideFromCode code override 0/21/22/23 or -1
-     * @return true if mag full after update
-     */
     public boolean update(Telemetry telemetry,
                           LoaderSubsystem loader,
                           boolean yEdge,
                           int patternTagOverrideFromCode) {
 
+        long t0 = System.nanoTime();
         long nowMs = System.currentTimeMillis();
 
-        // Latch shoot request (can be pressed early)
+        // Latch shoot request
         if (yEdge) shootRequested = true;
 
         // ===== Panels override: pretend slots contain balls =====
@@ -519,6 +552,7 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
 
                 lastOv0 = o0; lastOv1 = o1; lastOv2 = o2;
 
+                persistDirty = true;
                 if (telemetry != null) telemetry.addData("OVERRIDE", "S0=%d S1=%d S2=%d", o0, o1, o2);
             } else {
                 if (telemetry != null) telemetry.addData("OVERRIDE", "enabled but not near intake; ignoring");
@@ -531,13 +565,19 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
         boolean codeValid   = (patternTagOverrideFromCode == 0 || patternTagOverrideFromCode == 21 || patternTagOverrideFromCode == 22 || patternTagOverrideFromCode == 23);
         if (panelsValid) effectiveTag = patternTagOverride;
         else if (codeValid) effectiveTag = patternTagOverrideFromCode;
-        if (effectiveTag != -1) gameTag = effectiveTag;
+        if (effectiveTag != -1 && gameTag != effectiveTag) { gameTag = effectiveTag; persistDirty = true; }
 
         // Update sensing ONLY when aligned at intake and NOT shooting
         boolean aligned = isAlignedAtIntake();
+
+        long tSense = System.nanoTime();
+        updateMsHw = 0.0; // reset each loop; set inside slot0 I2C read if it happens
         if (aligned && state != State.SHOOTING) {
-            updateSensorsAligned(telemetry, nowMs);
+            if (!(SKIP_ALL_SENSORS_WHEN_SHOOTER_ON && !i2cAllowed)) {
+                updateSensorsAligned(telemetry, nowMs);
+            }
         }
+        updateMsSense = (System.nanoTime() - tSense) / 1e6;
 
         // If we become full in IDLE, start positioning to preshoot (but do not shoot yet)
         if (state == State.IDLE && isFull()) {
@@ -545,23 +585,27 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
             state = State.POSITION_TO_PARK_CW;
         }
 
-        // Allow partial mags: if shoot requested in IDLE and we have any ball, go preshoot first
-        if (state == State.IDLE && shootRequested && hasAnyBall() && !isFull()) {
-            planToPreshootFromCurrent();
-            state = State.POSITION_TO_PARK_CW;
+        // IMPORTANT FIX:
+        // Allow shooting even if slots are empty/not full (sensors unplugged).
+        if (state == State.IDLE && shootRequested) {
+            if (ALLOW_SHOOT_WHEN_SLOTS_EMPTY || hasAnyBall() || isFull()) {
+                planToPreshootFromCurrent();
+                state = State.POSITION_TO_PARK_CW;
+            }
         }
 
-        // Reset PID when state changes (prevents windup and “stuck” behavior)
+        // Reset PID when state changes
         if (lastState != state) {
             resetDrivePID();
             lastState = state;
         }
 
+        long tMotion = System.nanoTime();
+
         // State machine
         switch (state) {
             case IDLE: {
                 ejecting = false;
-                // Hold softly at targetAngleDeg
                 holdToTargetShortestPath();
                 break;
             }
@@ -587,7 +631,6 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
                 if (shootRequested) {
                     beginShooting(nowMs);
                     state = State.SHOOTING;
-                    // PID reset on next loop due to state change
                 }
                 break;
             }
@@ -596,17 +639,26 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
                 ejecting = true;
                 boolean done = updateShooting(nowMs);
                 if (done) {
-                    // passive assumption: everything got shot
-                    slots[0] = Ball.EMPTY;
-                    slots[1] = Ball.EMPTY;
-                    slots[2] = Ball.EMPTY;
+                    // In open-loop "shoot all", assume everything got shot.
+                    if (!SHOOT_ONE_BY_ONE) {
+                        slots[0] = Ball.EMPTY;
+                        slots[1] = Ball.EMPTY;
+                        slots[2] = Ball.EMPTY;
+                    }
+                    persistDirty = true;
 
-                    // Return to intake (SAFE CW)
-                    state = State.RETURNING_CW;
-                    targetAngleDeg = normalizeAngle(INTAKE_ANGLE_DEG);
+                    if (SHOOT_ONE_BY_ONE && !ONE_BY_ONE_RETURN_TO_INTAKE) {
+                        // stay at preshoot ready
+                        state = State.READY;
+                        // do NOT force sensor counters; we aren't aligned anyway
+                    } else {
+                        // Return to intake (SAFE CW)
+                        state = State.RETURNING_CW;
+                        targetAngleDeg = normalizeAngle(INTAKE_ANGLE_DEG);
 
-                    clearAllSensingCounters();
-                    slot0NeedsReread = true;
+                        clearAllSensingCounters();
+                        slot0NeedsReread = true;
+                    }
                 }
                 break;
             }
@@ -619,7 +671,11 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
             }
         }
 
-        persistToStorage();
+        updateMsMotion = (System.nanoTime() - tMotion) / 1e6;
+
+        long tPersist = System.nanoTime();
+        persistMaybe(nowMs);
+        updateMsPersist = (System.nanoTime() - tPersist) / 1e6;
 
         // Optional debug telemetry
         if (telemetry != null) {
@@ -637,6 +693,7 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
             telemetry.addData("Spd/eUsed", "%.1f", dbgLastErrUsedDeg);
         }
 
+        updateMs = (System.nanoTime() - t0) / 1e6;
         return isFull();
     }
 
@@ -665,7 +722,9 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
         double bestCw = Double.MAX_VALUE;
 
         for (int s : candidates) {
-            if (slots[s] == Ball.EMPTY) continue;
+            // If sensors are unplugged, slots can be EMPTY even when balls exist.
+            // We still need a deterministic plan.
+            if (!ALLOW_SHOOT_WHEN_SLOTS_EMPTY && slots[s] == Ball.EMPTY) continue;
 
             int score = 0;
             if (desired != null) {
@@ -680,17 +739,6 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
                 bestScore = score;
                 bestCw = cw;
                 bestSlot = s;
-            }
-        }
-
-        if (bestScore < 0) {
-            bestSlot = 0;
-            bestCw = Double.MAX_VALUE;
-            for (int s : candidates) {
-                if (slots[s] == Ball.EMPTY) continue;
-                double parkWheel = wheelAngleForPocketAtWorldAngle(s, parkWorld);
-                double cw = cwDeltaDeg(cur, parkWheel);
-                if (cw < bestCw) { bestCw = cw; bestSlot = s; }
             }
         }
 
@@ -751,6 +799,7 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
             slot0ColorFrames = 0;
             slot0LastColorFrame = Ball.EMPTY;
             slot0NeedsReread = false;
+            persistDirty = true;
         }
 
         if (slots[0] == Ball.EMPTY) {
@@ -775,6 +824,7 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
 
                 if (slot0PresentFrames >= PRESENT_FRAMES_REQUIRED && slot0ColorFrames >= COLOR_FRAMES_REQUIRED) {
                     slots[0] = slot0LastColorFrame;
+                    persistDirty = true;
 
                     slot0PresentFrames = 0;
                     slot0ColorFrames = 0;
@@ -814,6 +864,7 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
 
         if (presentFrames[slotIndex] >= PRESENT_FRAMES_REQUIRED && colorFrames[slotIndex] >= COLOR_FRAMES_REQUIRED) {
             slots[slotIndex] = lastColorFrame[slotIndex];
+            persistDirty = true;
 
             // IMPORTANT RULE: if slot1 or slot2 gets a ball, slot0 must be reread
             slot0NeedsReread = true;
@@ -824,34 +875,6 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
 
             if (telemetry != null) telemetry.addData("Slot" + slotIndex, "Committed %s (slot0 reread)", slots[slotIndex]);
         }
-    }
-
-    private boolean slot0PresentThisFrame() {
-        double d1 = slot0Color1.getDistance(DistanceUnit.CM);
-        double d2 = slot0Color2.getDistance(DistanceUnit.CM);
-
-        boolean p1 = !Double.isNaN(d1) && d1 <= SLOT0_DIST_THRESH_CM;
-        boolean p2 = !Double.isNaN(d2) && d2 <= SLOT0_DIST_THRESH_CM;
-        return p1 || p2;
-    }
-
-    private Ball slot0ColorThisFrame() {
-        double d1 = slot0Color1.getDistance(DistanceUnit.CM);
-        double d2 = slot0Color2.getDistance(DistanceUnit.CM);
-
-        boolean p1 = !Double.isNaN(d1) && d1 <= SLOT0_DIST_THRESH_CM;
-        boolean p2 = !Double.isNaN(d2) && d2 <= SLOT0_DIST_THRESH_CM;
-
-        if (!p1 && !p2) return Ball.EMPTY;
-
-        RevColorSensorV3 chosen;
-        if (p1 && p2) chosen = (d1 <= d2) ? slot0Color1 : slot0Color2;
-        else chosen = p1 ? slot0Color1 : slot0Color2;
-
-        RawColor raw = classifyColor(chosen);
-        if (raw == RawColor.GREEN) return Ball.GREEN;
-        if (raw == RawColor.PURPLE) return Ball.PURPLE;
-        return Ball.UNKNOWN;
     }
 
     private RawColor classifyColor(RevColorSensorV3 sensor) {
@@ -881,11 +904,10 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
     }
 
     private Slot0Frame readSlot0Frame(long nowMs) {
-
         // Master switch: never touch I2C
         if (!ENABLE_SLOT0_I2C) return new Slot0Frame(false, Ball.EMPTY);
 
-        // Shooter gate: skip slot0 I2C when shooter is on (TeleOp sets i2cAllowed)
+        // Shooter gate
         if (SKIP_SLOT0_I2C_WHEN_SHOOTER_ON && !i2cAllowed) {
             return new Slot0Frame(false, Ball.EMPTY);
         }
@@ -895,12 +917,14 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
             return new Slot0Frame(false, Ball.EMPTY);
         }
 
-        // Optional throttling (0 = no throttle)
+        // Optional throttling
         if (SLOT0_I2C_PERIOD_MS > 0 && (nowMs - slot0LastI2cMs) < SLOT0_I2C_PERIOD_MS) {
             return slot0CachedFrame;
         }
 
         slot0LastI2cMs = nowMs;
+
+        long tHw = System.nanoTime();
 
         // ---- Distance reads ONCE ----
         double d1 = slot0Color1.getDistance(DistanceUnit.CM);
@@ -912,10 +936,11 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
         boolean present = p1 || p2;
         if (!present) {
             slot0CachedFrame = new Slot0Frame(false, Ball.EMPTY);
+            updateMsHw = (System.nanoTime() - tHw) / 1e6;
             return slot0CachedFrame;
         }
 
-        // Choose closest present sensor (no extra distance reads)
+        // Choose closest present sensor
         RevColorSensorV3 chosen;
         if (p1 && p2) chosen = (d1 <= d2) ? slot0Color1 : slot0Color2;
         else chosen = p1 ? slot0Color1 : slot0Color2;
@@ -927,6 +952,7 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
                 : Ball.UNKNOWN;
 
         slot0CachedFrame = new Slot0Frame(true, c);
+        updateMsHw = (System.nanoTime() - tHw) / 1e6;
         return slot0CachedFrame;
     }
 
@@ -953,12 +979,10 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
         if (mode == ErrorMode.SHORTEST) return eShort;
 
         if (mode == ErrorMode.PREFER_CW) {
-            // Prefer CW, unless we're within overshoot-correct window
             if (eShort < -OVERSHOOT_CORRECT_MAX_DEG) return eShort + 360.0;
             return eShort;
         }
 
-        // PREFER_CCW
         if (eShort > OVERSHOOT_CORRECT_MAX_DEG) return eShort - 360.0;
         return eShort;
     }
@@ -967,7 +991,6 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
         double cur = getCurrentAngleDeg();
         double target = normalizeAngle(targetDeg);
 
-        // DONE check ALWAYS uses shortest error so it can't get stuck
         double eShort = smallestAngleDiff(target, cur);
         if (Math.abs(eShort) <= MOVE_DONE_TOL_DEG) {
             targetAngleDeg = target;
@@ -1001,17 +1024,14 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
         return false;
     }
 
-    /** Prefer CW (safe), allow small backtrack for overshoot. */
     private boolean moveTowardTargetCW(double targetDeg) {
         return driveToTarget(targetDeg, ErrorMode.PREFER_CW, MOVE_MAX_POWER);
     }
 
-    /** Prefer CCW (eject direction), allow small backtrack for overshoot. */
     private boolean moveTowardTargetCCW(double targetDeg) {
         return driveToTarget(targetDeg, ErrorMode.PREFER_CCW, MOVE_MAX_POWER);
     }
 
-    /** Shortest-path holding at targetAngleDeg. */
     private void holdToTargetShortestPath() {
         driveToTarget(targetAngleDeg, ErrorMode.SHORTEST, HOLD_MAX_POWER);
     }
@@ -1026,29 +1046,99 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
         shootMovedDeg = 0.0;
         shootLastTicks = motor.getCurrentPosition();
 
-        // Open-loop CCW in updateShooting()
+        if (SHOOT_ONE_BY_ONE) {
+            shotsRemaining = Math.max(1, ONE_BY_ONE_SHOTS_PER_SEQUENCE);
+            shotsDoneThisSeq = 0;
+            stepPhase = StepPhase.MOVING;
+            stepStartMs = nowMs;
+            dwellStartMs = 0;
+            stepLastTicks = shootLastTicks;
+            stepMovedDeg = 0.0;
+        }
+    }
+
+    private void clearOneSlotAfterShot(int shotIndex0Based) {
+        // Best effort: clear a slot consistent with selectedStartSlot eject order.
+        int[] order = EJECT_ORDER[selectedStartSlot];
+        int pocket = order[shotIndex0Based % SLOT_COUNT];
+        if (slots[pocket] != Ball.EMPTY) {
+            slots[pocket] = Ball.EMPTY;
+            persistDirty = true;
+        }
     }
 
     private boolean updateShooting(long nowMs) {
-        if (nowMs - shootStartMs > SHOOT_TIMEOUT_MS) {
+        if (!SHOOT_ONE_BY_ONE) {
+            // ===== Original "shoot all" open-loop =====
+            if (nowMs - shootStartMs > SHOOT_TIMEOUT_MS) {
+                setMotorPower(0.0);
+                return true;
+            }
+
+            int curTicks = motor.getCurrentPosition();
+            int dTicks = curTicks - shootLastTicks;
+            shootLastTicks = curTicks;
+
+            shootMovedDeg += Math.abs(dTicks) * DEG_PER_TICK;
+
+            double pwr = (nowMs - shootStartMs <= SHOOT_HIGH_MS) ? SHOOT_POWER_HIGH : SHOOT_POWER_LOW;
+
+            // CCW is eject direction => negative power in angle-space
+            setMotorPower(-pwr);
+
+            if (shootMovedDeg >= SHOOT_DEG) {
+                setMotorPower(0.0);
+                return true;
+            }
+
+            return false;
+        }
+
+        // ===== One-by-one indexed shooting =====
+        if (nowMs - shootStartMs > ONE_BY_ONE_TIMEOUT_MS) {
             setMotorPower(0.0);
             return true;
         }
 
-        int curTicks = motor.getCurrentPosition();
-        int dTicks = curTicks - shootLastTicks;
-        shootLastTicks = curTicks;
+        if (stepPhase == StepPhase.MOVING) {
+            int curTicks = motor.getCurrentPosition();
+            int dTicks = curTicks - stepLastTicks;
+            stepLastTicks = curTicks;
 
-        shootMovedDeg += Math.abs(dTicks) * DEG_PER_TICK;
+            stepMovedDeg += Math.abs(dTicks) * DEG_PER_TICK;
 
-        double pwr = (nowMs - shootStartMs <= SHOOT_HIGH_MS) ? SHOOT_POWER_HIGH : SHOOT_POWER_LOW;
+            long stepElapsed = nowMs - stepStartMs;
+            double pwr = (stepElapsed <= ONE_BY_ONE_HIGH_MS) ? ONE_BY_ONE_POWER_HIGH : ONE_BY_ONE_POWER_LOW;
 
-        // CCW is eject direction => negative power in angle-space
-        setMotorPower(-pwr);
+            setMotorPower(-pwr);
 
-        if (shootMovedDeg >= SHOOT_DEG) {
-            setMotorPower(0.0);
-            return true;
+            if (stepMovedDeg >= ONE_BY_ONE_STEP_DEG) {
+                setMotorPower(0.0);
+
+                // count shot + clear a slot estimate
+                clearOneSlotAfterShot(shotsDoneThisSeq);
+                shotsDoneThisSeq++;
+                shotsRemaining--;
+
+                // dwell before next shot
+                stepPhase = StepPhase.DWELL;
+                dwellStartMs = nowMs;
+            }
+            return false;
+        }
+
+        // DWELL
+        setMotorPower(0.0);
+
+        if (nowMs - dwellStartMs >= ONE_BY_ONE_DWELL_MS) {
+            if (shotsRemaining <= 0) {
+                return true;
+            }
+            // next step
+            stepPhase = StepPhase.MOVING;
+            stepStartMs = nowMs;
+            stepMovedDeg = 0.0;
+            stepLastTicks = motor.getCurrentPosition();
         }
 
         return false;
@@ -1075,7 +1165,6 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
     }
 
     private double ticksToAngle(int ticks) {
-        // If REVERSE_MOTOR flips, motor ticks move opposite direction for the same physical motion.
         int rel = ticks - zeroTicks;
         int signedRel = REVERSE_MOTOR ? -rel : rel;
 

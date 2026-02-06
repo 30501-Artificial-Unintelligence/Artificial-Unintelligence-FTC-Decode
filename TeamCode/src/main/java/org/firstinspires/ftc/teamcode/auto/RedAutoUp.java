@@ -16,11 +16,11 @@ import com.qualcomm.robotcore.eventloop.opmode.OpMode;
 import com.qualcomm.robotcore.util.Range;
 
 import org.firstinspires.ftc.teamcode.pedroPathing.Constants;
-import org.firstinspires.ftc.teamcode.subsystems.IntakeSubsystem_Motor;
+import org.firstinspires.ftc.teamcode.subsystems.IntakeSubsystem;
 import org.firstinspires.ftc.teamcode.subsystems.LoaderSubsystem;
 import org.firstinspires.ftc.teamcode.subsystems.PoseStorage;
-import org.firstinspires.ftc.teamcode.subsystems.ShooterSubsystemFF;
-import org.firstinspires.ftc.teamcode.subsystems.SpindexerSubsystem_State_new_Incremental;
+import org.firstinspires.ftc.teamcode.subsystems.ShooterSubsystemFF_dualMotor;
+import org.firstinspires.ftc.teamcode.subsystems.SpindexerSubsystem_Passive_State_new_Incremental;
 import org.firstinspires.ftc.teamcode.subsystems.TurretSubsystemIncremental;
 import org.firstinspires.ftc.teamcode.subsystems.VisionSubsystem;
 
@@ -53,7 +53,7 @@ public class RedAutoUp extends OpMode {
 
     // Power in path
     public static double PWR_FAST  = 0.95;
-    public static double PWR_CREEP = 0.25;
+    public static double PWR_CREEP = 0.4;
 
     // =========================
     // ===== TURRET / AIM ======
@@ -156,10 +156,10 @@ public class RedAutoUp extends OpMode {
     // =========================
     private TurretSubsystemIncremental turret;
     private VisionSubsystem vision;
-    private ShooterSubsystemFF shooter;
+    private ShooterSubsystemFF_dualMotor shooter;
     private LoaderSubsystem loader;
-    private SpindexerSubsystem_State_new_Incremental spindexer;
-    private IntakeSubsystem_Motor intake;
+    private SpindexerSubsystem_Passive_State_new_Incremental spindexer;
+    private IntakeSubsystem intake;
 
     // =========================
     // ===== PATH BUILDING ======
@@ -601,22 +601,22 @@ public class RedAutoUp extends OpMode {
 
         turret    = new TurretSubsystemIncremental(hardwareMap);
         vision    = new VisionSubsystem(hardwareMap);
-        shooter   = new ShooterSubsystemFF(hardwareMap);
+        shooter   = new ShooterSubsystemFF_dualMotor(hardwareMap);
         loader    = new LoaderSubsystem(hardwareMap);
-        spindexer = new SpindexerSubsystem_State_new_Incremental(hardwareMap);
-        intake    = new IntakeSubsystem_Motor(hardwareMap);
+        spindexer = new SpindexerSubsystem_Passive_State_new_Incremental(hardwareMap);
+        intake    = new IntakeSubsystem(hardwareMap);
 
         follower.setStartingPose(startPose);
         follower.update();
         buildPaths();
 
         // You manually rotate so slot0 is at LOAD when you press start:
-        spindexer.homeSlot0AtLoadHere();
+        //spindexer.homeSlot0AtLoadHere();
         // Preload preset so first shoot sequence actually has balls to eject
         spindexer.presetSlots(
-                SpindexerSubsystem_State_new_Incremental.Ball.PURPLE,
-                SpindexerSubsystem_State_new_Incremental.Ball.PURPLE,
-                SpindexerSubsystem_State_new_Incremental.Ball.PURPLE
+                SpindexerSubsystem_Passive_State_new_Incremental.Ball.PURPLE,
+                SpindexerSubsystem_Passive_State_new_Incremental.Ball.PURPLE,
+                SpindexerSubsystem_Passive_State_new_Incremental.Ball.PURPLE
         );
 
 
@@ -633,7 +633,7 @@ public class RedAutoUp extends OpMode {
 
         telemetry.addData("Spd angle", "%.1f", spindexer.getCurrentAngleDeg());
         telemetry.addData("Spd target", "%.1f", spindexer.getTargetAngleDeg());
-        telemetry.addData("Spd intakeIdx", spindexer.getIntakeSlotIndex());
+        //telemetry.addData("Spd intakeIdx", spindexer.getIntakeSlotIndex());
         telemetry.addData("Spd full", spindexer.isFull());
         telemetry.addData("Spd anyBall", spindexer.hasAnyBall());
         telemetry.addData("Spd ejecting", spindexer.isEjecting());
@@ -648,6 +648,8 @@ public class RedAutoUp extends OpMode {
         // Start in pattern preaim
         turretPhase = TurretPhase.PREAIM_PATTERN;
         turretZeroLatched = false;
+        // intake always on (matches your TeleOp right now)
+        intake.startIntake();
 
         // Start spindexer holding where it is (constructor does that)
     }
@@ -677,8 +679,7 @@ public class RedAutoUp extends OpMode {
         // run path state machine
         autonomousPathUpdate();
 
-        // intake always on (matches your TeleOp right now)
-        intake.startIntake();
+        intake.update();
 
         drawRobotOnPanels(follower.getPose());
 
