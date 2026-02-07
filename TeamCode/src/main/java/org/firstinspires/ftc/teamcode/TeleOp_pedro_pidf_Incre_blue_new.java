@@ -31,8 +31,8 @@ import java.util.List;
 import java.util.function.Supplier;
 
 @Configurable
-@TeleOp(name = "TeleOp with pedro and pidf _ incremental (FAST)", group = "Test")
-public class TeleOp_pedro_pidf_Incre extends OpMode {
+@TeleOp(name = "TeleOp with pedro and pidf _ incremental (FAST)_blue", group = "Test")
+public class TeleOp_pedro_pidf_Incre_blue_new extends OpMode {
 
     // ===== PEDRO FOLLOWER / DRIVE =====
     private Follower follower;
@@ -95,11 +95,11 @@ public class TeleOp_pedro_pidf_Incre extends OpMode {
     private boolean prevRB1 = false;
 
     // ===== SHOOT POSES (tune these numbers) =====
-    public static Pose SHOOT_POSE_NEAR = new Pose(80, 80, Math.toRadians(45));
-    public static Pose SHOOT_POSE_FAR  = new Pose(80.6, 17, Math.toRadians(90));
+    public static Pose SHOOT_POSE_NEAR = new Pose(48, 96, Math.toRadians(135));
+    public static Pose SHOOT_POSE_FAR  = new Pose(57, 20, Math.toRadians(120));
 
     public static double AIM_OFFSET_NEAR_DEG = 0.0;
-    public static double AIM_OFFSET_FAR_DEG  = 4.0;
+    public static double AIM_OFFSET_FAR_DEG  = -4.0;
 
     // ===== SHOOT ASSIST STATE =====
     private boolean shootAssistActive = false;
@@ -124,7 +124,7 @@ public class TeleOp_pedro_pidf_Incre extends OpMode {
     private TurretAimMode turretAimModeBeforeAssist = TurretAimMode.MANUAL_HOLD;
 
     // Face point in ODO mode (Pedro coords)
-    public static double ODO_FACE_X = 144.0;
+    public static double ODO_FACE_X = 0.0;
     public static double ODO_FACE_Y = 144.0;
 
     // ===== TELEMETRY MODE SWITCH =====

@@ -14,24 +14,49 @@ public class TurretSubsystemIncremental {
     // =========================
     // Motor / gear constants
     // =========================
-    private static final double TICKS_PER_MOTOR_REV = 384.5;
-    private static final double MOTOR_REV_PER_TURRET_REV = 280.0 / 60.0;
+    // goBILDA 435 rpm is ~383.6 ticks per output rev (you can keep 384.5 if that matches your testing)
+    public static double TICKS_PER_MOTOR_REV = 383.6;
 
-    private static final double TICKS_PER_TURRET_REV =
+    // 60T motor pulley -> 280T turret pulley
+    public static double MOTOR_REV_PER_TURRET_REV = 280.0 / 60.0;
+
+    public static double TICKS_PER_TURRET_REV =
             TICKS_PER_MOTOR_REV * MOTOR_REV_PER_TURRET_REV;
 
-    private static final double TICKS_PER_TURRET_DEG = TICKS_PER_TURRET_REV / 360.0;
+    public static double TICKS_PER_TURRET_DEG = TICKS_PER_TURRET_REV / 360.0;
 
     // Mechanical window
-    private static final double MIN_ANGLE_DEG = -200.0;
-    private static final double MAX_ANGLE_DEG =  200.0;
+    public static double MIN_ANGLE_DEG = -200.0;
+    public static double MAX_ANGLE_DEG =  200.0;
 
-    private static final double MAX_AUTO_POWER = 0.85;
+    // Same idea as your MAX_AUTO_POWER, but tunable from dashboard
+    public static double MAX_AUTO_POWER = 0.85;
+
+    // Position tolerance (ticks) used by RUN_TO_POSITION
+    public static double TARGET_TOL_DEG = 0.8; // 0.6–1.5 deg typical
+    public static int TARGET_TOL_TICKS = 6;    // overwritten in applyTuning()
+
+    // Optional: cap motor velocity for consistency (ticks/sec)
+    // goBILDA 435 rpm => ~7.25 rev/s => ~7.25*383.6 ≈ 2780 ticks/s free-ish
+    public static boolean USE_VELOCITY_CAP = true;
+    public static double MAX_VEL_TICKS_PER_SEC = 2400.0;
+
+    // Built-in motor PID tuning (this is often the #1 reason RUN_TO_POSITION feels slow)
+    // These affect RUN_USING_ENCODER velocity control and thus RUN_TO_POSITION behavior.
+    public static double VEL_P = 10.0;
+    public static double VEL_I = 3.0;
+    public static double VEL_D = 0.0;
+    public static double VEL_F = 0.0;
+
+    // RUN_TO_POSITION position P (bigger = drives harder toward target)
+    // If you get oscillation/overshoot, reduce this.
+    public static double POS_P = 12.0; // start 8..20 for turrets
 
     // Small deadband so we don’t spam new targets when dx/dy are tiny
-    private static final double FACE_TARGET_MIN_DIST_IN = 0.5;
+    public static double FACE_TARGET_MIN_DIST_IN = 0.5;
 
-
+    // Turret mount offset if turret 0 is not perfectly robot-forward
+    public static double TURRET_MOUNT_OFFSET_DEG = 0.0;
 
     // =========================
     // Hardware
@@ -48,17 +73,17 @@ public class TurretSubsystemIncremental {
     private double targetAngleDeg = 0.0;
     private boolean trackEnabled = false;
 
-    // Turret mount offset if turret 0 is not perfectly robot-forward
-    private static final double TURRET_MOUNT_OFFSET_DEG = 0.0;
-
     public TurretSubsystemIncremental(HardwareMap hardwareMap) {
         turretMotor = hardwareMap.get(DcMotorEx.class, "intakeMotor");
 
         turretMotor.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
         turretMotor.setDirection(DcMotorSimple.Direction.FORWARD);
 
-        // DO NOT reset encoder here if you want Auto -> TeleOp continuity.
+        // We keep your approach: start in RUN_USING_ENCODER; goToAngle switches to RUN_TO_POSITION.
         turretMotor.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
+
+        // Apply built-in controller tuning (big improvement for “slow RUN_TO_POSITION”)
+        applyTuning();
 
         // Restore offset from previous OpMode if available
         if (OpModeStorage.turretAngleOffsetDeg != null) {
@@ -73,6 +98,29 @@ public class TurretSubsystemIncremental {
         }
 
         targetAngleDeg = getCurrentAngleDeg();
+    }
+
+    // =========================
+    // Tuning helpers
+    // =========================
+    private void applyTuning() {
+        // Update derived constants (in case you tune ticks/rev live from dashboard)
+        TICKS_PER_TURRET_REV = TICKS_PER_MOTOR_REV * MOTOR_REV_PER_TURRET_REV;
+        TICKS_PER_TURRET_DEG = TICKS_PER_TURRET_REV / 360.0;
+
+        TARGET_TOL_TICKS = (int) Math.max(1, Math.round(TARGET_TOL_DEG * TICKS_PER_TURRET_DEG));
+        turretMotor.setTargetPositionTolerance(TARGET_TOL_TICKS);
+
+        // These methods exist on most FTC SDK versions with DcMotorEx
+        // If your SDK complains, tell me the compile error and I’ll swap to the compatible call.
+        turretMotor.setVelocityPIDFCoefficients(VEL_P, VEL_I, VEL_D, VEL_F);
+        turretMotor.setPositionPIDFCoefficients(POS_P);
+    }
+
+    private void setModeIfNeeded(DcMotor.RunMode mode) {
+        if (turretMotor.getMode() != mode) {
+            turretMotor.setMode(mode);
+        }
     }
 
     // =========================
@@ -156,22 +204,32 @@ public class TurretSubsystemIncremental {
 
         power = Range.clip(power, -1.0, 1.0);
 
-        if (turretMotor.getMode() != DcMotor.RunMode.RUN_USING_ENCODER
-                && turretMotor.getMode() != DcMotor.RunMode.RUN_WITHOUT_ENCODER) {
-            turretMotor.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
-        }
+        // If we were in RUN_TO_POSITION, switch back once (don’t spam)
+        setModeIfNeeded(DcMotor.RunMode.RUN_USING_ENCODER);
 
         turretMotor.setPower(power);
     }
 
     public void goToAngle(double commandedAngleDeg) {
+        // Re-apply tuning occasionally if you tweak dashboard constants live
+        // (cheap and keeps behavior consistent)
+        applyTuning();
+
         double currentDeg = getCurrentAngleDeg();
         targetAngleDeg = chooseWrappedWithinLimits(commandedAngleDeg, currentDeg);
 
         int targetTicks = turretDegToTicks(targetAngleDeg);
 
         turretMotor.setTargetPosition(targetTicks);
-        turretMotor.setMode(DcMotor.RunMode.RUN_TO_POSITION);
+
+        // Mode spam makes things feel sluggish; only set if needed.
+        setModeIfNeeded(DcMotor.RunMode.RUN_TO_POSITION);
+
+        // Optional: velocity cap makes it reach target faster *consistently* without weird ramping
+        if (USE_VELOCITY_CAP) {
+            turretMotor.setVelocity(MAX_VEL_TICKS_PER_SEC);
+        }
+
         turretMotor.setPower(MAX_AUTO_POWER);
     }
 
@@ -184,9 +242,11 @@ public class TurretSubsystemIncremental {
     }
     public boolean isTrackEnabled() { return trackEnabled; }
 
-    private static final double VISION_DEADBAND_DEG = 0.15;
-    private static final double VISION_GAIN = 3.0;
-    private static final double VISION_MAX_STEP_DEG = 50.0;
+    public static double VISION_DEADBAND_DEG = 0.15;
+    public static double VISION_GAIN = 3.0;
+
+    // If this is huge, you “teleport” the target and RUN_TO_POSITION looks slow because you keep retargeting.
+    public static double VISION_MAX_STEP_DEG = 10.0; // try 6..12 for smooth tracking
 
     public void trackWithTxDeg(double txDeg) {
         if (!trackEnabled) return;
@@ -243,5 +303,13 @@ public class TurretSubsystemIncremental {
     public void update() {
         OpModeStorage.turretAngleOffsetDeg = angleOffsetDeg;
         OpModeStorage.turretTrackEnabled = trackEnabled;
+
+        // Optional: if you want to stop heating the motor when it arrives, uncomment.
+        // This does NOT change your goToAngle logic, it just stops after it reports not busy.
+        /*
+        if (turretMotor.getMode() == DcMotor.RunMode.RUN_TO_POSITION && !turretMotor.isBusy()) {
+            turretMotor.setPower(0.0);
+        }
+        */
     }
 }

@@ -36,7 +36,7 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
      */
     public static boolean REVERSE_MOTOR = true;
 
-    // ===== OLD incremental PID defaults =====
+    // ===== incremental PID defaults =====
     public static double kP = 0.008;
     public static double kI = 0.0;
     public static double kD = 0.0;
@@ -79,7 +79,7 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
     public static double ONE_BY_ONE_POWER_LOW  = 0.9;
     public static long   ONE_BY_ONE_HIGH_MS    = 180;
     public static long   ONE_BY_ONE_DWELL_MS   = 120;   // pause between shots
-    public static long   ONE_BY_ONE_TIMEOUT_MS = 3500;  // total sequence timeout
+    public static long   ONE_BY_ONE_TIMEOUT_MS = 3000;  // total sequence timeout
 
     // If true, after a one-by-one sequence finishes, return to intake like normal.
     // If false, stay at READY (preshoot) after finishing sequence.
@@ -117,19 +117,15 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
 
     // World angles (by your convention)
     public static double INTAKE_ANGLE_DEG   = 0.0;
-    public static double PRESHOOT_ANGLE_DEG = 200.0;
+    public static double PRESHOOT_ANGLE_DEG = 220.0;
     /** "Staging" is defined as PRESHOOT + GO_PAST (CW safe). Example: GO_PAST=60 -> 240 staging. */
-    public static double GO_PAST_ANGLE_DEG  = 40.0;
+    public static double GO_PAST_ANGLE_DEG  = 60.0;
 
     // Trust sensors only when aligned to intake within this many degrees
     public static double ALIGN_TOL_DEG = 10.0;
 
     // Slot0 (Rev) presence threshold
-    public static double SLOT0_DIST_THRESH_CM = 3.0;
-
-    // Frame-based sensing (presence+color together)
-    public static int PRESENT_FRAMES_REQUIRED = 2;
-    public static int COLOR_FRAMES_REQUIRED   = 2;
+    public static double SLOT0_DIST_THRESH_CM = 5.0;
 
     // Movement control
     public static double MOVE_MAX_POWER = 0.55;
@@ -155,7 +151,27 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
     // Persist throttling (prevents per-loop allocations + GC spikes)
     public static long PERSIST_PERIOD_MS = 250;
 
+    // =========================
+    // ===== NEW: SENSING LOGIC ==
+    // =========================
+
+    // Slot1/2: require this many absent loops before we reset vote tracking (but we do NOT clear slot color)
+    public static int SLOT12_ABSENT_RESET_FRAMES = 2;
+
+    // Slot1/2: need at least this many sampled loops before committing/updating the color
+    public static int SLOT12_MIN_COLOR_SAMPLES = 2;
+
+    // Slot0: last-5 rolling window logic
+    private static final int SLOT0_WINDOW_N = 5;
+    public static int SLOT0_MIN_PRESENT_VOTES = 2;
+    public static int SLOT0_MIN_COLOR_VOTES   = 2;
+
+    // Save I2C bandwidth: alternate which REV sensor we probe first
+    public static boolean SLOT0_ALTERNATE_PROBE_ORDER = true;
+
+    // =========================
     // ===== DEBUG =====
+    // =========================
     private double dbgLastRequestedPower = 0.0;
     private double dbgLastAppliedPower   = 0.0;
     private double dbgLastErrShortestDeg = 0.0;
@@ -234,16 +250,6 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
     // =========================
     private final Ball[] slots = new Ball[SLOT_COUNT];
 
-    // Frame-based counters for slot0
-    private int slot0PresentFrames = 0;
-    private int slot0ColorFrames = 0;
-    private Ball slot0LastColorFrame = Ball.EMPTY;
-
-    // Frame-based counters for slot1/2
-    private final int[] presentFrames = new int[SLOT_COUNT];
-    private final int[] colorFrames = new int[SLOT_COUNT];
-    private final Ball[] lastColorFrame = new Ball[SLOT_COUNT];
-
     // Reread rule for slot0 when slot1/2 gets newly filled
     private boolean slot0NeedsReread = false;
 
@@ -308,6 +314,22 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
 
     private Slot0Frame slot0CachedFrame = new Slot0Frame(false, Ball.EMPTY);
 
+    // ===== NEW: Slot1/2 continuous voting state =====
+    private final int[] blAbsentStreak = new int[SLOT_COUNT];     // use index 1,2
+    private final boolean[] blTracking = new boolean[SLOT_COUNT]; // use index 1,2
+    private final int[] blGreenVotes = new int[SLOT_COUNT];
+    private final int[] blPurpleVotes = new int[SLOT_COUNT];
+    private final int[] blSamples = new int[SLOT_COUNT];
+
+    // ===== NEW: Slot0 last-5 window =====
+    private final boolean[] slot0WinPresent = new boolean[SLOT0_WINDOW_N];
+    private final Ball[] slot0WinColor = new Ball[SLOT0_WINDOW_N];
+    private int slot0WinIdx = 0;
+    private int slot0WinCount = 0;
+
+    // Probe flip to alternate REV order
+    private boolean slot0ProbeFlip = false;
+
     // =========================
     // ===== PERF TIMING ========
     // =========================
@@ -350,10 +372,13 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
 
         for (int i = 0; i < SLOT_COUNT; i++) {
             slots[i] = Ball.EMPTY;
-            presentFrames[i] = 0;
-            colorFrames[i] = 0;
-            lastColorFrame[i] = Ball.EMPTY;
+            blAbsentStreak[i] = 0;
+            blTracking[i] = false;
+            blGreenVotes[i] = 0;
+            blPurpleVotes[i] = 0;
+            blSamples[i] = 0;
         }
+        clearSlot0Window();
 
         restoreFromStorageOrDefaultToIntake();
 
@@ -433,8 +458,6 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
         return true;
     }
 
-
-
     public boolean isEjecting() { return ejecting; }
 
     public int getGameTag() { return gameTag; }
@@ -477,9 +500,53 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
                 || state == State.RETURNING_CW;
     }
 
+    // ===== TRIM / CALIBRATION =====
+    public static double TRIM_STEP_DEG = 5.0;
+
+    /**
+     * Adjust the internal angle reference by +/- degrees WITHOUT moving the wheel.
+     * This is the "software trim" you use when the plate slipped mechanically.
+     *
+     * Positive deltaDeg => reported angle increases.
+     *
+     * It changes zeroTicks so your computed angle shifts, and then re-latches targetAngleDeg
+     * to the current physical position so the motor doesn't jump.
+     */
+    public void trimAngleOffsetDeg(double deltaDeg) {
+        // convert degrees -> encoder ticks
+        int deltaTicks = (int) Math.round(deltaDeg / DEG_PER_TICK);
+
+        // ticksToAngle() uses signedRel = (REVERSE_MOTOR ? -rel : rel)
+        // So changing zeroTicks affects the sign; this keeps "deltaDeg" meaning consistent.
+        if (REVERSE_MOTOR) {
+            zeroTicks += deltaTicks;
+        } else {
+            zeroTicks -= deltaTicks;
+        }
+
+        // Prevent any sudden motion after changing the reference
+        targetAngleDeg = getCurrentAngleDeg();
+        resetDrivePID();
+
+        // Persist so it survives opmode switches (same RC session)
+        persistDirty = true;
+        persistToStorage();
+    }
+
+    /** Convenience: +5 deg trim */
+    public void trimPlusStep() {
+        trimAngleOffsetDeg(+TRIM_STEP_DEG);
+    }
+
+    /** Convenience: -5 deg trim */
+    public void trimMinusStep() {
+        trimAngleOffsetDeg(-TRIM_STEP_DEG);
+    }
+
+
     // =========================
-// ===== SLOT PRESET API ====
-// =========================
+    // ===== SLOT PRESET API ====
+    // =========================
 
     /**
      * Preloads the internal slot model (useful for preloads / testing).
@@ -495,12 +562,9 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
         slots[1] = (s1 == null) ? Ball.EMPTY : s1;
         slots[2] = (s2 == null) ? Ball.EMPTY : s2;
 
-        // When we manually preset, treat sensors as "needs reread" so we don't immediately overwrite
-        // your preload if you're not aligned / not sensing.
         clearAllSensingCounters();
         slot0NeedsReread = true;
 
-        // Persist across opmodes in same RC session (your class already has this method)
         persistToStorage();
     }
 
@@ -513,7 +577,6 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
     public void clearSlots() {
         presetSlots(Ball.EMPTY, Ball.EMPTY, Ball.EMPTY);
     }
-
 
     // =========================
     // ===== MAIN UPDATE ========
@@ -571,7 +634,7 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
         boolean aligned = isAlignedAtIntake();
 
         long tSense = System.nanoTime();
-        updateMsHw = 0.0; // reset each loop; set inside slot0 I2C read if it happens
+        updateMsHw = 0.0; // set inside slot0 I2C read if it happens
         if (aligned && state != State.SHOOTING) {
             if (!(SKIP_ALL_SENSORS_WHEN_SHOOTER_ON && !i2cAllowed)) {
                 updateSensorsAligned(telemetry, nowMs);
@@ -585,8 +648,7 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
             state = State.POSITION_TO_PARK_CW;
         }
 
-        // IMPORTANT FIX:
-        // Allow shooting even if slots are empty/not full (sensors unplugged).
+        // Allow shooting even if slots are empty
         if (state == State.IDLE && shootRequested) {
             if (ALLOW_SHOOT_WHEN_SLOTS_EMPTY || hasAnyBall() || isFull()) {
                 planToPreshootFromCurrent();
@@ -648,11 +710,8 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
                     persistDirty = true;
 
                     if (SHOOT_ONE_BY_ONE && !ONE_BY_ONE_RETURN_TO_INTAKE) {
-                        // stay at preshoot ready
                         state = State.READY;
-                        // do NOT force sensor counters; we aren't aligned anyway
                     } else {
-                        // Return to intake (SAFE CW)
                         state = State.RETURNING_CW;
                         targetAngleDeg = normalizeAngle(INTAKE_ANGLE_DEG);
 
@@ -691,6 +750,11 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
             telemetry.addData("Spd/pwrSet", "%.2f", dbgLastAppliedPower);
             telemetry.addData("Spd/eShort", "%.1f", dbgLastErrShortestDeg);
             telemetry.addData("Spd/eUsed", "%.1f", dbgLastErrUsedDeg);
+
+            telemetry.addData("Spd/ms_total", "%.2f", updateMs);
+            telemetry.addData("Spd/ms_sense", "%.2f", updateMsSense);
+            telemetry.addData("Spd/ms_i2c", "%.2f", updateMsHw);
+            telemetry.addData("Spd/ms_motion", "%.2f", updateMsMotion);
         }
 
         updateMs = (System.nanoTime() - t0) / 1e6;
@@ -711,7 +775,6 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
 
     private int chooseStartSlotForCurrentTag() {
         int[] candidates = new int[]{0, 1, 2};
-
         Ball[] desired = getPatternForTag(gameTag);
 
         double cur = getCurrentAngleDeg();
@@ -722,8 +785,6 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
         double bestCw = Double.MAX_VALUE;
 
         for (int s : candidates) {
-            // If sensors are unplugged, slots can be EMPTY even when balls exist.
-            // We still need a deterministic plan.
             if (!ALLOW_SHOOT_WHEN_SLOTS_EMPTY && slots[s] == Ball.EMPTY) continue;
 
             int score = 0;
@@ -776,105 +837,132 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
     // ===== SENSING (aligned) ==
     // =========================
     private void clearAllSensingCounters() {
-        slot0PresentFrames = 0;
-        slot0ColorFrames = 0;
-        slot0LastColorFrame = Ball.EMPTY;
-
         for (int i = 0; i < SLOT_COUNT; i++) {
-            presentFrames[i] = 0;
-            colorFrames[i] = 0;
-            lastColorFrame[i] = Ball.EMPTY;
+            blAbsentStreak[i] = 0;
+            blTracking[i] = false;
+            blGreenVotes[i] = 0;
+            blPurpleVotes[i] = 0;
+            blSamples[i] = 0;
         }
+        clearSlot0Window();
+    }
+
+    private void clearSlot0Window() {
+        for (int i = 0; i < SLOT0_WINDOW_N; i++) {
+            slot0WinPresent[i] = false;
+            slot0WinColor[i] = Ball.EMPTY;
+        }
+        slot0WinIdx = 0;
+        slot0WinCount = 0;
     }
 
     private void updateSensorsAligned(Telemetry telemetry, long nowMs) {
-        // Slot1 & Slot2 (Brushland)
-        updateBrushlandSlot(1, slot1Present.getState(), slot1Green.getState(), telemetry);
-        updateBrushlandSlot(2, slot2Present.getState(), slot2Green.getState(), telemetry);
+        // Slot1 & Slot2 continuous voting (keeps committed color even when absent)
+        updateBrushlandSlotContinuous(1, slot1Present.getState(), slot1Green.getState(), telemetry);
+        updateBrushlandSlotContinuous(2, slot2Present.getState(), slot2Green.getState(), telemetry);
 
-        // Slot0 needs reread => clear ONCE, then allow frames to accumulate
+        // If forced reread, reset slot0 window (don’t touch slot1/2)
         if (slot0NeedsReread) {
             slots[0] = Ball.EMPTY;
-            slot0PresentFrames = 0;
-            slot0ColorFrames = 0;
-            slot0LastColorFrame = Ball.EMPTY;
+            clearSlot0Window();
             slot0NeedsReread = false;
             persistDirty = true;
         }
 
-        if (slots[0] == Ball.EMPTY) {
-            Slot0Frame f = readSlot0Frame(nowMs);
-            boolean present = f.present;
-            Ball frameColor = f.color;
-
-            if (!present) {
-                slot0PresentFrames = 0;
-                slot0ColorFrames = 0;
-                slot0LastColorFrame = Ball.EMPTY;
-            } else {
-                slot0PresentFrames++;
-
-                if (frameColor == Ball.GREEN || frameColor == Ball.PURPLE) {
-                    if (frameColor == slot0LastColorFrame) slot0ColorFrames++;
-                    else { slot0LastColorFrame = frameColor; slot0ColorFrames = 1; }
-                } else {
-                    slot0LastColorFrame = Ball.EMPTY;
-                    slot0ColorFrames = 0;
-                }
-
-                if (slot0PresentFrames >= PRESENT_FRAMES_REQUIRED && slot0ColorFrames >= COLOR_FRAMES_REQUIRED) {
-                    slots[0] = slot0LastColorFrame;
-                    persistDirty = true;
-
-                    slot0PresentFrames = 0;
-                    slot0ColorFrames = 0;
-                    slot0LastColorFrame = Ball.EMPTY;
-
-                    if (telemetry != null) telemetry.addData("Slot0", "Committed %s", slots[0]);
-                }
-            }
-        }
+        // Slot0 continuous last-5 window voting
+        updateSlot0Continuous(nowMs, telemetry);
     }
 
-    private void updateBrushlandSlot(int slotIndex, boolean presentRaw, boolean greenRaw, Telemetry telemetry) {
+    private void updateBrushlandSlotContinuous(int slotIndex, boolean presentRaw, boolean greenRaw, Telemetry telemetry) {
         if (slotIndex != 1 && slotIndex != 2) return;
-        if (slots[slotIndex] != Ball.EMPTY) return; // latch only
 
-        boolean present = presentRaw; // active-high
-        Ball frameColor = Ball.EMPTY;
-
-        if (present) frameColor = greenRaw ? Ball.GREEN : Ball.PURPLE;
-
-        if (!present) {
-            presentFrames[slotIndex] = 0;
-            colorFrames[slotIndex] = 0;
-            lastColorFrame[slotIndex] = Ball.EMPTY;
+        if (!presentRaw) {
+            blAbsentStreak[slotIndex]++;
+            if (blAbsentStreak[slotIndex] >= SLOT12_ABSENT_RESET_FRAMES) {
+                blTracking[slotIndex] = false;
+                blGreenVotes[slotIndex] = 0;
+                blPurpleVotes[slotIndex] = 0;
+                blSamples[slotIndex] = 0;
+            }
             return;
         }
 
-        presentFrames[slotIndex]++;
+        // present
+        blAbsentStreak[slotIndex] = 0;
 
-        if (frameColor == Ball.GREEN || frameColor == Ball.PURPLE) {
-            if (frameColor == lastColorFrame[slotIndex]) colorFrames[slotIndex]++;
-            else { lastColorFrame[slotIndex] = frameColor; colorFrames[slotIndex] = 1; }
-        } else {
-            lastColorFrame[slotIndex] = Ball.EMPTY;
-            colorFrames[slotIndex] = 0;
+        if (!blTracking[slotIndex]) {
+            blTracking[slotIndex] = true;
+            blGreenVotes[slotIndex] = 0;
+            blPurpleVotes[slotIndex] = 0;
+            blSamples[slotIndex] = 0;
         }
 
-        if (presentFrames[slotIndex] >= PRESENT_FRAMES_REQUIRED && colorFrames[slotIndex] >= COLOR_FRAMES_REQUIRED) {
-            slots[slotIndex] = lastColorFrame[slotIndex];
+        Ball frameColor = greenRaw ? Ball.GREEN : Ball.PURPLE;
+        blSamples[slotIndex]++;
+        if (frameColor == Ball.GREEN) blGreenVotes[slotIndex]++;
+        else blPurpleVotes[slotIndex]++;
+
+        if (blSamples[slotIndex] < SLOT12_MIN_COLOR_SAMPLES) return;
+
+        Ball best;
+        if (blGreenVotes[slotIndex] > blPurpleVotes[slotIndex]) best = Ball.GREEN;
+        else if (blPurpleVotes[slotIndex] > blGreenVotes[slotIndex]) best = Ball.PURPLE;
+        else return; // tie: keep previous
+
+        Ball prev = slots[slotIndex];
+        if (prev != best) {
+            slots[slotIndex] = best;
             persistDirty = true;
 
-            // IMPORTANT RULE: if slot1 or slot2 gets a ball, slot0 must be reread
-            slot0NeedsReread = true;
+            // If slot1/2 just got its first non-empty commit, force slot0 to re-evaluate next aligned loop
+            if (prev == Ball.EMPTY && best != Ball.EMPTY) {
+                slot0NeedsReread = true;
+            }
 
-            presentFrames[slotIndex] = 0;
-            colorFrames[slotIndex] = 0;
-            lastColorFrame[slotIndex] = Ball.EMPTY;
-
-            if (telemetry != null) telemetry.addData("Slot" + slotIndex, "Committed %s (slot0 reread)", slots[slotIndex]);
+            if (telemetry != null) telemetry.addData("Slot" + slotIndex,
+                    "Vote->%s (G=%d P=%d n=%d)",
+                    best, blGreenVotes[slotIndex], blPurpleVotes[slotIndex], blSamples[slotIndex]);
         }
+    }
+
+    private void updateSlot0Continuous(long nowMs, Telemetry telemetry) {
+        Slot0Frame f = readSlot0Frame(nowMs);
+        pushSlot0Window(f.present, f.color);
+
+        int presentVotes = 0;
+        int greenVotes = 0;
+        int purpleVotes = 0;
+
+        for (int i = 0; i < slot0WinCount; i++) {
+            if (!slot0WinPresent[i]) continue;
+            presentVotes++;
+
+            if (slot0WinColor[i] == Ball.GREEN) greenVotes++;
+            else if (slot0WinColor[i] == Ball.PURPLE) purpleVotes++;
+        }
+
+        Ball best = Ball.UNKNOWN;
+        int bestVotes = 0;
+        if (greenVotes > purpleVotes) { best = Ball.GREEN; bestVotes = greenVotes; }
+        else if (purpleVotes > greenVotes) { best = Ball.PURPLE; bestVotes = purpleVotes; }
+
+        if (presentVotes >= SLOT0_MIN_PRESENT_VOTES && best != Ball.UNKNOWN && bestVotes >= SLOT0_MIN_COLOR_VOTES) {
+            if (slots[0] != best) {
+                slots[0] = best;
+                persistDirty = true;
+                if (telemetry != null) telemetry.addData("Slot0", "Win5->%s (pres=%d G=%d P=%d)",
+                        best, presentVotes, greenVotes, purpleVotes);
+            }
+        }
+        // Intentionally do NOT clear slot0 back to EMPTY due to absence (shooting/clearSlots handles that)
+    }
+
+    private void pushSlot0Window(boolean present, Ball color) {
+        slot0WinPresent[slot0WinIdx] = present;
+        slot0WinColor[slot0WinIdx] = color;
+
+        slot0WinIdx = (slot0WinIdx + 1) % SLOT0_WINDOW_N;
+        if (slot0WinCount < SLOT0_WINDOW_N) slot0WinCount++;
     }
 
     private RawColor classifyColor(RevColorSensorV3 sensor) {
@@ -926,26 +1014,36 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
 
         long tHw = System.nanoTime();
 
-        // ---- Distance reads ONCE ----
-        double d1 = slot0Color1.getDistance(DistanceUnit.CM);
-        double d2 = slot0Color2.getDistance(DistanceUnit.CM);
+        // --- Choose probe order (alternate each call to spread I2C load) ---
+        RevColorSensorV3 first = slot0Color1;
+        RevColorSensorV3 second = slot0Color2;
 
-        boolean p1 = !Double.isNaN(d1) && d1 <= SLOT0_DIST_THRESH_CM;
-        boolean p2 = !Double.isNaN(d2) && d2 <= SLOT0_DIST_THRESH_CM;
+        if (SLOT0_ALTERNATE_PROBE_ORDER) {
+            slot0ProbeFlip = !slot0ProbeFlip;
+            if (slot0ProbeFlip) { first = slot0Color2; second = slot0Color1; }
+        }
 
-        boolean present = p1 || p2;
-        if (!present) {
+        // ---- Distance reads (often only ONE sensor read) ----
+        double dFirst = first.getDistance(DistanceUnit.CM);
+        boolean pFirst = !Double.isNaN(dFirst) && dFirst <= SLOT0_DIST_THRESH_CM;
+
+        RevColorSensorV3 chosen = null;
+
+        if (pFirst) {
+            chosen = first;
+        } else {
+            double dSecond = second.getDistance(DistanceUnit.CM);
+            boolean pSecond = !Double.isNaN(dSecond) && dSecond <= SLOT0_DIST_THRESH_CM;
+            if (pSecond) chosen = second;
+        }
+
+        if (chosen == null) {
             slot0CachedFrame = new Slot0Frame(false, Ball.EMPTY);
             updateMsHw = (System.nanoTime() - tHw) / 1e6;
             return slot0CachedFrame;
         }
 
-        // Choose closest present sensor
-        RevColorSensorV3 chosen;
-        if (p1 && p2) chosen = (d1 <= d2) ? slot0Color1 : slot0Color2;
-        else chosen = p1 ? slot0Color1 : slot0Color2;
-
-        // ---- RGB reads ONCE ----
+        // ---- RGB reads ONCE (only from chosen sensor) ----
         RawColor raw = classifyColor(chosen);
         Ball c = (raw == RawColor.GREEN) ? Ball.GREEN
                 : (raw == RawColor.PURPLE) ? Ball.PURPLE
@@ -1058,7 +1156,6 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
     }
 
     private void clearOneSlotAfterShot(int shotIndex0Based) {
-        // Best effort: clear a slot consistent with selectedStartSlot eject order.
         int[] order = EJECT_ORDER[selectedStartSlot];
         int pocket = order[shotIndex0Based % SLOT_COUNT];
         if (slots[pocket] != Ball.EMPTY) {
@@ -1069,7 +1166,6 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
 
     private boolean updateShooting(long nowMs) {
         if (!SHOOT_ONE_BY_ONE) {
-            // ===== Original "shoot all" open-loop =====
             if (nowMs - shootStartMs > SHOOT_TIMEOUT_MS) {
                 setMotorPower(0.0);
                 return true;
@@ -1094,7 +1190,7 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
             return false;
         }
 
-        // ===== One-by-one indexed shooting =====
+        // One-by-one indexed shooting
         if (nowMs - shootStartMs > ONE_BY_ONE_TIMEOUT_MS) {
             setMotorPower(0.0);
             return true;
@@ -1115,12 +1211,10 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
             if (stepMovedDeg >= ONE_BY_ONE_STEP_DEG) {
                 setMotorPower(0.0);
 
-                // count shot + clear a slot estimate
                 clearOneSlotAfterShot(shotsDoneThisSeq);
                 shotsDoneThisSeq++;
                 shotsRemaining--;
 
-                // dwell before next shot
                 stepPhase = StepPhase.DWELL;
                 dwellStartMs = nowMs;
             }
@@ -1134,7 +1228,6 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
             if (shotsRemaining <= 0) {
                 return true;
             }
-            // next step
             stepPhase = StepPhase.MOVING;
             stepStartMs = nowMs;
             stepMovedDeg = 0.0;
@@ -1187,6 +1280,10 @@ public class SpindexerSubsystem_Passive_State_new_Incremental {
         } catch (Exception e) {
             return null;
         }
+    }
+
+    public String getStateName() {
+        return state.name();
     }
 
 }

@@ -10,39 +10,31 @@ import com.bylazar.configurables.annotations.Configurable;
 @TeleOp(name = "Servo Test2", group = "Test")
 public class ServoTestTeleop2 extends LinearOpMode {
 
-    private double servoPosition = 0;  // start centered
+    private double servoPosition = 0.5; // start centered
 
     @Override
     public void runOpMode() throws InterruptedException {
-        // initialization
-        Servo servoOne = hardwareMap.get(Servo.class, "hoodServo");
+        Servo servoOne = hardwareMap.get(Servo.class, "servo_one");
 
-        servoOne.setPosition(0.5);
+        servoOne.setPosition(servoPosition);
 
         waitForStart();
 
         while (opModeIsActive()) {
+            // Up is negative on the stick, so invert it
+            double stick = -gamepad1.right_stick_y; // now up is positive
 
-            // FTC gamepad: up is negative, down is positive
-            // If you want up on the stick to move servo up, flip the sign as needed
-            double stick = gamepad1.right_stick_y; // or -gamepad1.right_stick_y
+            // Map stick [-1, 1] -> servo [0, 1]
+            servoPosition = 0.5 + stick * 0.5;
+            servoPosition = Range.clip(servoPosition, 0.0, 1.0);
 
-            // Map stick [-1, 1] -> servo [0, 1], centered at 0.5
-//            servoPosition = 0.5 + stick * 0.5;
-            servoPosition =  stick;
-            // Keep in valid range
-//            servoPosition = Range.clip(servoPosition, 0.0, 1.0);
-
-            // Apply to servo
             servoOne.setPosition(servoPosition);
 
-            // Telemetry
-            telemetry.addData("Servo Position", servoPosition);
-            telemetry.addData("Stick Y", stick);
+            telemetry.addData("Servo Position Cmd", servoPosition);
+            telemetry.addData("Stick", stick);
             telemetry.update();
 
-            // Let other stuff breathe
-            idle();  // or sleep(10);
+            //idle();
         }
     }
 }

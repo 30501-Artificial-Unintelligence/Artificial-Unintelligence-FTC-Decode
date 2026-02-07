@@ -24,25 +24,24 @@ import org.firstinspires.ftc.teamcode.subsystems.TurretSubsystemIncremental;
 import org.firstinspires.ftc.teamcode.subsystems.VisionSubsystem;
 
 @Configurable
-@Autonomous(name = "RedAutoUp_Incremental", group = "Auto")
-public class RedAutoUp extends OpMode {
+@Autonomous(name = "BlueAutoUp_Incremental_new", group = "Auto")
+public class BlueAutoUpNew extends OpMode {
 
     // =========================
     // ===== POSES / PATHS =====
     // =========================
-    private final Pose startPose   = new Pose(109.6, 132, Math.toRadians(90));
-    private final Pose scorePose   = new Pose(90, 90, Math.toRadians(45));
+    private final Pose startPose   = new Pose(33.2, 132, Math.toRadians(90));
+    private final Pose scorePose   = new Pose(48, 96, Math.toRadians(135));
 
-    private final Pose prePickup1Pose = new Pose(92, 82.1, Math.toRadians(0));
-    private final Pose pickup1Pose    = new Pose(122.9, 83.5, Math.toRadians(0));
+    private final Pose prePickup1Pose = new Pose(46.7, 81.8, Math.toRadians(180));
+    private final Pose pickup1Pose    = new Pose(16.4, 81.8, Math.toRadians(180));
 
-    private final Pose prePickup2Pose = new Pose(89.9, 58, Math.toRadians(0));
-    private final Pose pickup2Pose    = new Pose(129.4, 58, Math.toRadians(0));
+    private final Pose prePickup2Pose = new Pose(44.4, 59, Math.toRadians(180));
+    private final Pose pickup2Pose    = new Pose(9, 59, Math.toRadians(180));
 
-    private final Pose prePickup3Pose = new Pose(89.1, 34.7, Math.toRadians(0));
-    private final Pose pickup3Pose    = new Pose(126.5, 35, Math.toRadians(0));
-
-    private final Pose parkPose = new Pose(122.3, 69, Math.toRadians(90));
+    private final Pose prePickup3Pose = new Pose(46, 37, Math.toRadians(180));
+    private final Pose pickup3Pose    = new Pose(9.4, 36, Math.toRadians(180));
+    private final Pose parkPose = new Pose(16, 73, Math.toRadians(90));
 
     private Path scorePreload;
     private PathChain goPrePickup1, creepToPickup1, scorePickup1;
@@ -80,11 +79,11 @@ public class RedAutoUp extends OpMode {
     public static double PATTERN_TAG_X = 72.0;
     public static double PATTERN_TAG_Y = 160.0;
 
-    public static double ODO_FACE_X = 144.0;
+    public static double ODO_FACE_X = 0.0;
     public static double ODO_FACE_Y = 144.0;
 
     public static boolean VISION_TURRET_TRACKING_ENABLED = true;
-    public static int TRACK_TAG_ID = 24;
+    public static int TRACK_TAG_ID = 20;
 
     public static double TRACK_TX_DEADBAND_DEG = 0.4;
     public static double TRACK_MAX_STEP_DEG    = 2.0;
@@ -94,7 +93,7 @@ public class RedAutoUp extends OpMode {
     public static long TAG_LOST_TIMEOUT_MS = 250;
 
     public static double AIM_TX_READY_DEG   = 0.7;
-    public static double AIM_ANGLE_TOL_DEG  = 5.0;
+    public static double AIM_ANGLE_TOL_DEG  = 8.0;
 
     public static double TURRET_ZERO_TOL_DEG = 5.0;
 

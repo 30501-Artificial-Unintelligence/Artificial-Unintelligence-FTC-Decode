@@ -254,28 +254,28 @@ public class TeleOp_PassiveSpindexer extends OpMode {
         telemetry.addData("dTicks", dt);
         telemetry.addData("SpAngle", "%.1f", spindexer.getCurrentAngleDeg());
         //telemetry.addData("SpErrToTarget", "%.1f", spindexer.getAngleErrorToTargetDeg());
-        double pReq = spindexer.dbgLastRequestedPower();
-        double pApp = spindexer.dbgLastAppliedPower();
+//        double pReq = spindexer.dbgLastRequestedPower();
+//        double pApp = spindexer.dbgLastAppliedPower();
 
 // Signs: +1 / 0 / -1
         int tickSign = Integer.compare(dt, 0);
-        int pwrSign  = Double.compare(pApp, 0.0);
-
-        String tickS = tickSign > 0 ? "+" : (tickSign < 0 ? "-" : "0");
-        String pwrS  = pwrSign  > 0 ? "+" : (pwrSign  < 0 ? "-" : "0");
-
-        boolean meaningful = (tickSign != 0) && (pwrSign != 0);
-        boolean match = meaningful && (tickSign == pwrSign);
-
-        if (!meaningful) signNA++;
-        else if (match) signMatch++;
-        else signMismatch++;
-
-// Telemetry
-        telemetry.addData("Dbg pwrReq", "%.2f", pReq);
-        telemetry.addData("Dbg pwrApp", "%.2f", pApp);
-        telemetry.addData("Dbg sign (pwr/ticks)", "%s / %s  => %s", pwrS, tickS, meaningful ? (match ? "MATCH" : "MISMATCH") : "N/A");
-        telemetry.addData("Dbg sign stats", "match=%d mismatch=%d na=%d", signMatch, signMismatch, signNA);
+////        int pwrSign  = Double.compare(pApp, 0.0);
+//
+//        String tickS = tickSign > 0 ? "+" : (tickSign < 0 ? "-" : "0");
+//        String pwrS  = pwrSign  > 0 ? "+" : (pwrSign  < 0 ? "-" : "0");
+//
+//        boolean meaningful = (tickSign != 0) && (pwrSign != 0);
+//        boolean match = meaningful && (tickSign == pwrSign);
+//
+//        if (!meaningful) signNA++;
+//        else if (match) signMatch++;
+//        else signMismatch++;
+//
+//// Telemetry
+////        telemetry.addData("Dbg pwrReq", "%.2f", pReq);
+////        telemetry.addData("Dbg pwrApp", "%.2f", pApp);
+//        telemetry.addData("Dbg sign (pwr/ticks)", "%s / %s  => %s", pwrS, tickS, meaningful ? (match ? "MATCH" : "MISMATCH") : "N/A");
+//        telemetry.addData("Dbg sign stats", "match=%d mismatch=%d na=%d", signMatch, signMismatch, signNA);
 
         telemetryM.update(telemetry);
         telemetry.update();

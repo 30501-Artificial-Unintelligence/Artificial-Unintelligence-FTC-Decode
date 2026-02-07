@@ -15,8 +15,8 @@ public class ServoTestTeleop extends LinearOpMode {
     @Override
     public void runOpMode() throws InterruptedException {
         // initialization
-        CRServo servoOne = hardwareMap.get(CRServo.class, "turretServoOne");
-        CRServo servoTwo = hardwareMap.get(CRServo.class,"turretServoTwo");
+        CRServo servoOne = hardwareMap.get(CRServo.class, "turretServoA");
+        CRServo servoTwo = hardwareMap.get(CRServo.class,"turretServoB");
         servoOne.setPower(servoPosition);
         servoTwo.setPower(servoPosition);
 

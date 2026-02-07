@@ -16,6 +16,10 @@ public class PIDFController {
     private double lastError = 0.0;
     private long lastTimeNs = 0;
     private boolean first = true;
+    private double kV = 1.0;
+    private double kS = 1.0;
+    private double rpm = 1.0;
+
 
     // Optional anti-windup clamp
     private double integralClamp = 1.0; // in "error-seconds" units (tune if needed)
@@ -65,7 +69,7 @@ public class PIDFController {
         double derivative = (dt > 0) ? (error - lastError) / dt : 0.0;
         lastError = error;
 
-        return (kP * error) + (kI * integral) + (kD * derivative) + kF;
+        return (kP * error) + (kI * integral) + (kD * derivative) + (kS + kV * rpm);
     }
 
     public double getP() { return kP; }
