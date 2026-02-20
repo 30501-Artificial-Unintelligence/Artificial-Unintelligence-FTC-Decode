@@ -55,7 +55,7 @@ public class BlueAutoUp extends OpMode {
 
     // Power in path
     public static double PWR_FAST  = 0.85;
-    public static double PWR_CREEP = 0.25;
+    public static double PWR_CREEP = 0.4;
 
     // =========================
     // ===== TURRET / AIM ======

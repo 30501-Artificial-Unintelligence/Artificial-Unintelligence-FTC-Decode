@@ -290,7 +290,7 @@ public class BlueAutoUpNew extends OpMode {
             case 23:
                 if (!follower.isBusy()) {
                     startShootSequence();
-                    setPathState(102); // <-- FIX: was 999, which skipped pickup3
+                    setPathState(103); // <-- FIX: was 999, which skipped pickup3
                 }
                 break;
 
