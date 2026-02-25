@@ -3,15 +3,22 @@ package org.firstinspires.ftc.teamcode;
 import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
 
-import org.firstinspires.ftc.teamcode.subsystems.ShooterSubsystemFF;
+import org.firstinspires.ftc.teamcode.subsystems.ShooterSubsystemNoPID;
+
+import org.firstinspires.ftc.robotcore.external.navigation.CurrentUnit;
+
+import com.qualcomm.hardware.rev.RevHubOrientationOnRobot;
+
 
 @TeleOp(name = "Shooter Only TeleOp", group = "Test")
 public class ShooterOnlyTestTeleOp extends LinearOpMode {
 
-    private ShooterSubsystemFF shooter;
+    private ShooterSubsystemNoPID shooter;
 
     // 0 = near field, 1 = far field
     private int fieldPos = 0;
+
+    private double current = 0;
 
     // Rising-edge trackers
     private boolean prevX = false;
@@ -22,7 +29,7 @@ public class ShooterOnlyTestTeleOp extends LinearOpMode {
 
     @Override
     public void runOpMode() {
-        shooter = new ShooterSubsystemFF(hardwareMap);
+        shooter = new ShooterSubsystemNoPID(hardwareMap);
 
         telemetry.addLine("ShooterOnlyTeleOp ready.");
         telemetry.addLine("Controls:");
@@ -35,6 +42,7 @@ public class ShooterOnlyTestTeleOp extends LinearOpMode {
         if (isStopRequested()) return;
 
         while (opModeIsActive()) {
+
 
             // --- Toggle shooter on/off with A (rising edge) ---
             boolean a = gamepad1.a;
@@ -70,12 +78,12 @@ public class ShooterOnlyTestTeleOp extends LinearOpMode {
             telemetry.addData("Far RPM", "%.0f", shooter.getFarRpm());
             telemetry.addData("Current Target RPM", "%.0f", shooter.getTargetRpm());
             telemetry.addData("RPM (estimate)", "%.0f", shooter.getCurrentRpmEstimate());
-
+            telemetry.addData("Current", "%.0f", shooter.getCurrent());
             // Optional debug if you want it:
-            telemetry.addData("Target TPS", "%.0f", shooter.getTargetTps());
-            telemetry.addData("Vel TPS", "%.0f", shooter.getVelocityTps());
-            telemetry.addData("Power Cmd", "%.3f", shooter.getPowerCmd());
-            telemetry.addData("FF", "%.3f", shooter.getFF());
+//            telemetry.addData("Target TPS", "%.0f", shooter.getTargetTps());
+//            telemetry.addData("Vel TPS", "%.0f", shooter.getVelocityTps());
+//            telemetry.addData("Power Cmd", "%.3f", shooter.getPowerCmd());
+//            telemetry.addData("FF", "%.3f", shooter.getFF());
 
             telemetry.update();
 

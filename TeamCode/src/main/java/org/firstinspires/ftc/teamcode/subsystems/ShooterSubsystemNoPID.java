@@ -6,6 +6,8 @@ import com.qualcomm.robotcore.hardware.DcMotorSimple;
 import com.qualcomm.robotcore.hardware.HardwareMap;
 import com.qualcomm.robotcore.hardware.Servo;
 
+import org.firstinspires.ftc.robotcore.external.navigation.CurrentUnit;
+
 public class ShooterSubsystemNoPID {
 
     // ===== MOTOR CONSTANTS =====
@@ -45,6 +47,8 @@ public class ShooterSubsystemNoPID {
     // edge-detection for RPM buttons (TeleOp sends raw button states)
     private boolean prevRpmUp = false;
     private boolean prevRpmDown = false;
+
+    private double current = 0;
 
     public ShooterSubsystemNoPID(HardwareMap hardwareMap) {
         motor = hardwareMap.get(DcMotorEx.class, "motor_one");
@@ -119,6 +123,7 @@ public class ShooterSubsystemNoPID {
         } else {
             motor.setPower(0.0);
         }
+
     }
 
     // ===== GETTERS FOR TELEMETRY / OTHER SUBSYSTEMS =====
@@ -166,4 +171,8 @@ public class ShooterSubsystemNoPID {
     public void setFarRPM(long RPM) {
         farRpm = RPM;
     }
+
+    public double getCurrent(){
+        current = motor.getCurrent(CurrentUnit.AMPS);
+        return current;}
 }
